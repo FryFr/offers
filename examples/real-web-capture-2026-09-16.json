@@ -1,0 +1,28 @@
+[
+  {
+    "title": "Senior Automation, AI & Enterprise Applications Engineer",
+    "company": "Coforge",
+    "source": "greenhouse",
+    "externalId": "5187551007",
+    "url": "https://job-boards.greenhouse.io/encora10/jobs/5187551007",
+    "kind": "employment",
+    "skills": ["python", "generative ai", "machine learning", "llm", "intelligent automation", "apis", "data pipelines", "ai governance"],
+    "remote": true,
+    "location": "Colombia; Bolivia; Costa Rica; Peru",
+    "description": "Fuente consultada el 2026-09-16. La publicación indica modalidad remota, Colombia entre las ubicaciones, experiencia de 5-7 años y trabajo en automatización, IA, aplicaciones empresariales e integraciones. No publica salario en la ficha consultada. Publicada el 2026-08-14.",
+    "industry": "enterprise applications"
+  },
+  {
+    "title": "Generative AI Engineer – LATAM Candidates Only",
+    "company": "Talentus Global",
+    "source": "kickstartremote",
+    "externalId": "2733",
+    "url": "https://kickstartremote.com/remote-jobs/generative-ai-engineer-latam-candidates-only-colombia-remote-2733",
+    "kind": "employment",
+    "skills": ["python", "llm", "rag", "vector databases", "rest apis", "backend", "cloud", "docker", "kubernetes", "ci/cd"],
+    "remote": true,
+    "location": "LATAM; Colombia",
+    "description": "Fuente consultada el 2026-09-16. La ficha indica contrato remoto en USD, mínimo 3 años, Python, APIs, RAG, bases vectoriales, cloud, Docker y Kubernetes; también exige inglés C1 y experiencia con clientes estadounidenses. La página consultada reporta que el empleo puede estar vencido o tener un problema; salario exacto no publicado.",
+    "industry": "generative ai"
+  }
+]

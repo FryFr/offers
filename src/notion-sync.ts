@@ -1,0 +1,185 @@
+import type { report } from './pipeline.ts';
+import { identity } from './pipeline.ts';
+import { parseAvailability, parseOpportunity, type AvailabilityEvidence, type Opportunity } from './contracts.ts';
+import { verification, type Verification } from './evaluate.ts';
+
+type Projection = ReturnType<typeof report>['notion']['records'][number];
+export type NotionRecord = Pick<Projection, 'externalKey' | 'properties'> & { opportunity?: Opportunity };
+const calculationContextFields = ['Origin', 'Calculation assumptions', 'Explanation'] as const;
+const fields = ['Name', 'Company', 'URL', 'Type', 'Expiration', 'Deadline', 'Verification', 'Verification reasons', 'Published', 'Screening', 'Screening reasons', 'Employment eligibility', 'Location', 'Relocation', 'Recommendation rank', 'Recommendation priority', 'Fit score', 'Economic score', 'Hourly USD', 'Freelance review', ...calculationContextFields] as const;
+export interface NotionConfig {
+  enabled: boolean;
+  dataSourceId?: string;
+  databaseId?: string;
+  externalKeyProperty: string;
+  includeCalculationContext: boolean;
+  propertyMap: Partial<Record<typeof fields[number], string>>;
+}
+export interface HttpRequest { method: 'POST' | 'PATCH'; url: string; headers: Record<string, string>; body: Record<string, unknown> }
+export interface HttpResponse { status: number; body: unknown }
+/** Authentication belongs to the caller's transport; this module never reads credentials. */
+export type HttpTransport = (request: HttpRequest) => Promise<HttpResponse>;
+const obj = (v: unknown): Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
+const invalid = () => new Error('Configuración Notion inválida');
+export function validateNotionConfig(value: unknown): NotionConfig {
+  const v = obj(value);
+  if (Object.keys(v).some(k => !['enabled', 'dataSourceId', 'databaseId', 'externalKeyProperty', 'includeCalculationContext', 'propertyMap'].includes(k))) throw invalid();
+  if (v.enabled !== undefined && typeof v.enabled !== 'boolean') throw invalid();
+  if (v.includeCalculationContext !== undefined && typeof v.includeCalculationContext !== 'boolean') throw invalid();
+  const validId = (id: unknown) => typeof id === 'string' && /^(?:[a-f\d]{32}|[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12})$/i.test(id);
+  if ((v.dataSourceId === undefined) === (v.databaseId === undefined) || !validId(v.dataSourceId ?? v.databaseId)) throw invalid();
+  const name = (n: unknown): n is string => typeof n === 'string' && !!n.trim() && n === n.trim() && n.length <= 100;
+  if (!name(v.externalKeyProperty)) throw invalid();
+  if (v.propertyMap !== undefined && (v.propertyMap === null || typeof v.propertyMap !== 'object' || Array.isArray(v.propertyMap))) throw invalid();
+  const map = obj(v.propertyMap);
+  if (Object.entries(map).some(([k, n]) => !fields.includes(k as typeof fields[number]) || !name(n))) throw invalid();
+  const activeFields = v.includeCalculationContext === true ? fields : fields.filter(k => !calculationContextFields.includes(k as typeof calculationContextFields[number]));
+  const names = activeFields.map(k => map[k] ?? k);
+  if (new Set([...names, v.externalKeyProperty]).size !== activeFields.length + 1) throw invalid();
+  return { enabled: v.enabled === true, ...(v.dataSourceId ? { dataSourceId: v.dataSourceId as string } : { databaseId: v.databaseId as string }), externalKeyProperty: v.externalKeyProperty, includeCalculationContext: v.includeCalculationContext === true, propertyMap: { ...map } };
+}
+function request(config: NotionConfig, method: HttpRequest['method'], path: string, body: Record<string, unknown>): HttpRequest {
+  return { method, url: `https://api.notion.com/v1/${path}`, headers: { 'Content-Type': 'application/json', 'Notion-Version': config.dataSourceId ? '2025-09-03' : '2022-06-28' }, body };
+}
+function query(config: NotionConfig, key: string): HttpRequest {
+  return request(config, 'POST', `${config.dataSourceId ? 'data_sources' : 'databases'}/${config.dataSourceId ?? config.databaseId}/query`, { filter: { property: config.externalKeyProperty, rich_text: { equals: key } }, page_size: 2 });
+}
+function properties(record: NotionRecord, config: NotionConfig): Record<string, unknown> {
+  if (typeof record.externalKey !== 'string' || !/^[a-f\d]{64}$/.test(record.externalKey)) throw new Error('Registro inválido');
+  const result: Record<string, unknown> = Object.create(null);
+  for (const key of fields) {
+    if (!config.includeCalculationContext && calculationContextFields.includes(key as typeof calculationContextFields[number])) continue;
+    if (Object.hasOwn(record.properties, key)) result[config.propertyMap[key] ?? key] = record.properties[key];
+  }
+  result[config.externalKeyProperty] = { rich_text: [{ text: { content: record.externalKey } }] };
+  return result;
+}
+function gate(record: NotionRecord, now: Date): Verification {
+  if (!record.opportunity) return { status: 'unknown', reasons: ['verification_context_missing'], ageDays: null, sameDay: false, validUntil: null };
+  const opportunity = parseOpportunity(record.opportunity);
+  if (identity(opportunity) !== record.externalKey) throw new Error('invalid_record');
+  const result = verification(opportunity, now);
+  if (record.properties.Screening?.select.name === 'discarded' || record.properties['Employment eligibility']?.select.name === 'ineligible') {
+    return { ...result, status: 'unknown', reasons: [...result.reasons, 'screening_excluded'] };
+  }
+  return result;
+}
+export function planNotionSync(records: readonly NotionRecord[], value: unknown, now = new Date()) {
+  const config = validateNotionConfig(value);
+  const checked = records.map(record => ({ record, verification: gate(record, now) }));
+  return { mode: 'dry-run' as const, confirmed: false,
+    blocked: checked.filter(r => r.verification.status !== 'verified').map(r => ({ externalKey: r.record.externalKey, verification: r.verification })),
+    records: checked.filter(r => r.verification.status === 'verified').map(({ record }) => ({ externalKey: record.externalKey, action: 'query-then-upsert' as const, query: query(config, record.externalKey), create: createRequest(record, config), update: { properties: properties(record, config) } })) };
+}
+function createRequest(record: NotionRecord, config: NotionConfig) {
+  return request(config, 'POST', 'pages', { parent: config.dataSourceId ? { type: 'data_source_id', data_source_id: config.dataSourceId } : { database_id: config.databaseId }, properties: properties(record, config) });
+}
+async function confirmed(transport: HttpTransport, req: HttpRequest): Promise<Record<string, unknown>> {
+  let response: HttpResponse;
+  try { response = await transport(req); } catch { throw new Error('transport_error'); }
+  if (!response || !Number.isInteger(response.status) || response.status < 200 || response.status >= 300) throw new Error('http_error');
+  return obj(response.body);
+}
+export async function queryExistingPages(key: string, value: unknown, transport: HttpTransport) {
+  const config = validateNotionConfig(value);
+  if (!config.enabled) throw new Error('sync_disabled');
+  if (!/^[a-f\d]{64}$/.test(key)) throw new Error('invalid_record');
+  const body = await confirmed(transport, query(config, key));
+  if (body.object !== 'list' || !Array.isArray(body.results) || typeof body.has_more !== 'boolean') throw new Error('invalid_response');
+  // More than one match is ambiguous. Never choose a page or create another one.
+  if (body.has_more || body.results.length > 1) throw new Error('duplicate_external_key');
+  return body.results.map(value => {
+    const page = obj(value);
+    if (page.object !== 'page' || typeof page.id !== 'string' || !page.id || !page.properties || page.archived === true || page.in_trash === true) throw new Error('invalid_response');
+    return { id: page.id, properties: obj(page.properties) };
+  });
+}
+// Compare only the writable values we own, ignoring Notion IDs, colors and annotations.
+function comparable(value: unknown): unknown {
+  const p = obj(value);
+  for (const type of ['title', 'rich_text']) if (Array.isArray(p[type])) return { [type]: p[type].map((v: unknown) => obj(obj(v).text).content ?? obj(v).plain_text ?? '').join('') };
+  if ('select' in p) return { select: p.select === null ? null : obj(p.select).name };
+  if ('date' in p) return { date: p.date === null ? null : { start: obj(p.date).start, end: obj(p.date).end ?? null, time_zone: obj(p.date).time_zone ?? null } };
+  if ('number' in p) return { number: p.number };
+  if ('url' in p) return { url: p.url };
+  return null;
+}
+export interface SyncResult { created: number; updated: number; skipped: number; failed: number; records: { index: number; status: 'created' | 'updated' | 'skipped' | 'failed'; reason?: string; verification?: Verification; opportunity?: Opportunity }[] }
+export interface SyncOptions {
+  now?: () => Date;
+  revalidate?: (opportunity: Opportunity, signal: AbortSignal) => Promise<AvailabilityEvidence>;
+  timeoutMs?: number;
+}
+async function revalidate(o: Opportunity, options: SyncOptions, now: () => Date): Promise<Opportunity> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const fallback = (outcome: 'timeout' | 'error'): AvailabilityEvidence => ({ url: o.url!, checkedAt: now().toISOString(), outcome });
+  try {
+    const observation = await Promise.race([
+      Promise.resolve().then(() => options.revalidate!(structuredClone(o), controller.signal)),
+      new Promise<AvailabilityEvidence>(resolve => { timer = setTimeout(() => { resolve(fallback('timeout')); controller.abort(); }, options.timeoutMs ?? 5000); }),
+    ]);
+    return { ...o, availability: parseAvailability(observation) };
+  } catch { return { ...o, availability: fallback('error') }; }
+  finally { if (timer) clearTimeout(timer); }
+}
+const activeSyncs = new Map<string, Promise<void>>();
+async function exclusively<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = activeSyncs.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>(resolve => { release = resolve; });
+  activeSyncs.set(key, current);
+  await previous;
+  try { return await operation(); }
+  finally { release(); if (activeSyncs.get(key) === current) activeSyncs.delete(key); }
+}
+export async function upsertNotionRecords(records: readonly NotionRecord[], value: unknown, transport: HttpTransport, options: SyncOptions = {}): Promise<SyncResult> {
+  const config = validateNotionConfig(value);
+  const now = options.now ?? (() => new Date());
+  if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 60_000)) throw new Error('timeoutMs inválido');
+  const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, records: [] };
+  const seen = new Set<string>();
+  for (const [index, record] of records.entries()) {
+    let status: SyncResult['records'][number]['status'] = 'skipped';
+    let reason: string | undefined;
+    let checked: Verification | undefined;
+    let opportunity: Opportunity | undefined;
+    if (!config.enabled) reason = 'sync_disabled';
+    else if (seen.has(record.externalKey)) reason = 'duplicate_in_batch';
+    else try {
+      seen.add(record.externalKey);
+      await exclusively(`${config.dataSourceId ?? config.databaseId}:${record.externalKey}`, async () => {
+        let candidate = structuredClone(record);
+        checked = gate(candidate, now());
+        if (checked.status !== 'verified') { reason = 'verification_blocked'; return; }
+        if (options.revalidate) {
+          opportunity = await revalidate(candidate.opportunity!, options, now);
+          candidate = { ...candidate, opportunity };
+          checked = gate(candidate, now());
+          if (checked.status !== 'verified') { reason = 'verification_blocked'; return; }
+        }
+        candidate.properties.Verification = { select: { name: checked.status } };
+        candidate.properties['Verification reasons'] = { rich_text: [] };
+        candidate.properties.Published = { date: { start: candidate.opportunity!.publishedAt! } };
+        const props = properties(candidate, config);
+        const [page] = await queryExistingPages(record.externalKey, config, transport);
+        checked = gate(candidate, now());
+        if (checked.status !== 'verified') { reason = 'verification_blocked'; return; }
+        if (page && Object.entries(props).every(([key, v]) => JSON.stringify(comparable(v)) === JSON.stringify(comparable(page.properties[key])))) reason = 'unchanged';
+        else {
+          const req = page ? request(config, 'PATCH', `pages/${encodeURIComponent(page.id)}`, { properties: props }) : createRequest(candidate, config);
+          const response = await confirmed(transport, req);
+          if (response.object !== 'page' || typeof response.id !== 'string' || !response.id || (page && response.id !== page.id)) throw new Error('invalid_response');
+          status = page ? 'updated' : 'created';
+        }
+      });
+    } catch (error) {
+      status = 'failed';
+      const code = error instanceof Error ? error.message : '';
+      reason = ['transport_error', 'http_error', 'invalid_response', 'duplicate_external_key'].includes(code) ? code : 'invalid_record';
+    }
+    result[status]++;
+    result.records.push({ index, status, ...(reason ? { reason } : {}), ...(checked ? { verification: checked } : {}), ...(opportunity ? { opportunity } : {}) });
+  }
+  return result;
+}

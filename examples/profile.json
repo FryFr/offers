@@ -1,0 +1,9 @@
+{
+  "skills": ["typescript", "node.js"],
+  "preferredKinds": ["employment", "freelance"],
+  "remoteOnly": true,
+  "targetHourlyUsd": 35,
+  "freelanceFloorHourlyUsd": 25,
+  "attractiveProjectBudgetUsd": 2000,
+  "hoursPerMonth": 160
+}

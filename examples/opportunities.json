@@ -1,0 +1,24 @@
+[
+  {
+    "title": "Backend developer",
+    "company": "Example Employment",
+    "source": "manual",
+    "externalId": "job-1",
+    "kind": "employment",
+    "skills": ["typescript", "node.js"],
+    "remote": true,
+    "compensation": { "currency": "USD", "period": "month", "min": 4800 },
+    "expiresAt": "2026-10-01"
+  },
+  {
+    "title": "Freelance API maintenance",
+    "company": "Example Client",
+    "source": "manual",
+    "externalId": "project-1",
+    "skills": ["typescript"],
+    "remote": true,
+    "recurring": true,
+    "compensation": { "currency": "USD", "period": "project", "min": 2400, "estimatedHours": 120 },
+    "expiresAt": "2026-09-30"
+  }
+]
