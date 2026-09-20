@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseOpportunity, type Opportunity } from './contracts.ts';
-import type { Source } from './source-registry.ts';
+import { ATS_ADAPTERS, type Adapter, type Source } from './source-registry.ts';
 import { validatePublicUrl } from './safe-http.ts';
 import { parseRss } from './rss.ts';
 import { sponsorshipFromDescription } from './sponsorship.ts';
@@ -86,7 +86,44 @@ const EMPLOYMENT_TYPES: Record<string, Opportunity['employmentType']> = {
   contract: 'contract', contractor: 'contract', freelance: 'contract', temporary: 'temporary', temp: 'temporary',
   intern: 'internship', internship: 'internship', 'internship/co-op': 'internship',
 };
-const employmentType = (raw: unknown): Opportunity['employmentType'] => typeof raw === 'string' ? EMPLOYMENT_TYPES[raw.trim().toLowerCase()] : undefined;
+/** Se normaliza quitando separadores: "Full Time", "full-time" y "FullTime" son lo mismo. */
+const employmentType = (raw: unknown): Opportunity['employmentType'] => typeof raw === 'string'
+  ? EMPLOYMENT_TYPES[raw.trim().toLowerCase()] ?? EMPLOYMENT_TYPES[raw.trim().toLowerCase().replace(/[\s_-]+/g, '')]
+  : undefined;
+/** Vocabulario de seniority de los proveedores → enum interno. */
+const SENIORITY: Record<string, NonNullable<Opportunity['seniority']>[number]> = {
+  internship: 'intern', intern: 'intern', entrylevel: 'junior', junior: 'junior', jr: 'junior',
+  midlevel: 'mid', mid: 'mid', intermediate: 'mid', associate: 'mid',
+  senior: 'senior', sr: 'senior', staff: 'staff', principal: 'principal', lead: 'lead',
+  manager: 'lead', director: 'director', executive: 'executive', vp: 'executive', clevel: 'executive',
+};
+const seniorityList = (raw: unknown): Opportunity['seniority'] => {
+  if (!Array.isArray(raw)) return undefined;
+  const levels = [...new Set(raw.flatMap(v => typeof v === 'string' ? [SENIORITY[v.trim().toLowerCase().replace(/[\s_-]+/g, '')]] : []).filter(Boolean))];
+  return levels.length ? levels as Opportunity['seniority'] : undefined;
+};
+/** Periodos de salario tal como los nombran los agregadores. */
+const SALARY_PERIODS: Record<string, NonNullable<Opportunity['compensation']>['period']> = {
+  annual: 'year', annually: 'year', yearly: 'year', year: 'year',
+  monthly: 'month', month: 'month', weekly: 'week', week: 'week',
+  daily: 'day', day: 'day', hourly: 'hour', hour: 'hour',
+};
+/**
+ * Salario declarado por un agregador. Aplica las mismas cotas de credibilidad que Ashby y trata
+ * el cero como ausencia: RemoteOK devuelve `salary_min: 0, salary_max: 0` cuando no hay dato,
+ * y creerle significaría rankear una vacante como si pagara nada.
+ */
+function aggregatorPay(min: unknown, max: unknown, currency: unknown, period: unknown, field: string): PayReading {
+  const low = typeof min === 'number' && Number.isFinite(min) && min > 0 ? min : undefined;
+  if (low === undefined) return { disclosure: 'not_published' };
+  const high = typeof max === 'number' && Number.isFinite(max) && max >= low ? max : low;
+  const resolved = typeof period === 'string' ? SALARY_PERIODS[period.trim().toLowerCase()] : undefined;
+  const code = typeof currency === 'string' && /^[A-Za-z]{3}$/.test(currency.trim()) ? currency.trim().toUpperCase() : undefined;
+  const evidence = { field, raw: `${low}-${high} ${code ?? '?'} ${String(period ?? '?')}`.slice(0, 500) };
+  const bounds = resolved ? PLAUSIBLE_PAY[resolved] : undefined;
+  if (!resolved || !code || !bounds || low < bounds.min || high > bounds.max) return { disclosure: 'unparsed', evidence };
+  return { compensation: { currency: code, period: resolved, min: low, ...(high > low ? { max: high } : {}) }, disclosure: 'published', evidence };
+}
 /** `remoteness` de seis niveles; `remote` booleano se deriva después en `parseOpportunity`. */
 const REMOTENESS: Record<string, Opportunity['remoteness']> = {
   remote: 'fully_remote', 'fully remote': 'fully_remote', hybrid: 'hybrid', onsite: 'in_person',
@@ -129,9 +166,18 @@ function htmlToText(raw: string): string {
     .slice(0, DESCRIPTION_LIMIT);
 }
 
-export function adaptSource(source: Source, body: string, now: Date, endpoint = source.endpoint): { jobs: CapturedJob[]; rejected: number } {
+/**
+ * Dónde vive el array de ofertas en la respuesta de cada proveedor. `null` = la raíz es el array.
+ * Un descriptor explícito evita la lista de excepciones que crecía en cada adaptador nuevo.
+ */
+const ROWS_PATH: Record<Adapter, string | null> = {
+  greenhouse: 'jobs', lever: null, ashby: 'jobs', rss: null,
+  remotive: 'jobs', himalayas: 'jobs', jobicy: 'jobs', remoteok: null, arbeitnow: 'data', landingjobs: null,
+};
+export function adaptSource(source: Source, body: string, now: Date, endpoint = source.endpoint): { jobs: CapturedJob[]; rejected: number; nextCursor?: string } {
   const payload: unknown = source.adapter === 'rss' ? parseRss(body) : JSON.parse(body);
-  const rows = ['lever', 'rss'].includes(source.adapter) ? payload : object(payload).jobs;
+  const path = ROWS_PATH[source.adapter];
+  const rows = path === null ? payload : (object(payload) as Record<string, unknown>)[path];
   if (!Array.isArray(rows) || rows.length > 10_000) throw new Error('malformed_feed');
   let rejected = 0; const jobs: CapturedJob[] = [];
   for (const raw of rows) {
@@ -142,6 +188,7 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
       let title: unknown = r.title, company: unknown = source.company, url: unknown, id: unknown = r.id;
       let date: unknown, dateField: string | undefined, description: unknown, location: unknown, remote: boolean | undefined;
       let mode: Opportunity['remoteness'], contract: Opportunity['employmentType'], restrictions: string[] | undefined;
+      let levels: Opportunity['seniority'], skills: string[] | undefined, expires: string | undefined;
       let pay: PayReading = { disclosure: 'not_published' };
       switch (source.adapter) {
         case 'remotive':
@@ -180,6 +227,66 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
           if (Array.isArray(r.secondaryLocations)) restrictions = r.secondaryLocations.map(l => typeof l === 'string' ? l : typeof l === 'object' && l ? String(object(l).location ?? '') : '').filter(Boolean);
           pay = ashbyPay(r);
           break;
+        case 'himalayas':
+          // pubDate y expiryDate son epoch en SEGUNDOS, no ISO. Trae la señal más rica de todas
+          // las fuentes: seniority, salario estructurado y restricciones de ubicación.
+          company = r.companyName; url = r.applicationLink; id = r.guid ?? r.applicationLink;
+          date = r.pubDate; dateField = 'pubDate'; description = r.description ?? r.excerpt;
+          contract = employmentType(r.employmentType);
+          levels = seniorityList(r.seniority);
+          expires = epochDate(r.expiryDate, new Date(8.64e15)) ?? undefined;
+          if (Array.isArray(r.locationRestrictions)) restrictions = r.locationRestrictions.filter((l): l is string => typeof l === 'string' && !!l.trim());
+          location = restrictions?.length ? restrictions.join('; ') : 'Remote';
+          mode = 'fully_remote';
+          pay = aggregatorPay(r.minSalary, r.maxSalary, r.currency, r.salaryPeriod, 'minSalary/maxSalary');
+          break;
+        case 'jobicy':
+          company = r.companyName; title = r.jobTitle; url = r.url; date = r.pubDate; dateField = 'pubDate';
+          description = r.jobDescription ?? r.jobExcerpt;
+          contract = employmentType(Array.isArray(r.jobType) ? r.jobType[0] : r.jobType);
+          levels = seniorityList(Array.isArray(r.jobLevel) ? r.jobLevel : [r.jobLevel]);
+          if (Array.isArray(r.jobGeo) || typeof r.jobGeo === 'string') restrictions = (Array.isArray(r.jobGeo) ? r.jobGeo : [r.jobGeo]).filter((l): l is string => typeof l === 'string' && !!l.trim());
+          location = restrictions?.length ? restrictions.join('; ') : 'Remote';
+          mode = 'fully_remote';
+          pay = aggregatorPay(r.annualSalaryMin, r.annualSalaryMax, r.salaryCurrency, 'annual', 'annualSalaryMin/Max');
+          break;
+        case 'remoteok':
+          // La primera fila del feed es un aviso legal documentado, no una vacante malformada:
+          // se salta sin contarla como rechazo, que marcaría la fuente como `partial` cada ciclo.
+          if (r.legal !== undefined || r.position === undefined) continue;
+          company = r.company; title = r.position; url = r.url ?? r.apply_url; date = r.epoch; dateField = 'epoch';
+          description = r.description; location = optional(r.location) ?? 'Remote'; mode = 'fully_remote';
+          if (Array.isArray(r.tags)) skills = r.tags.filter((t): t is string => typeof t === 'string' && !!t.trim()).slice(0, 30);
+          pay = aggregatorPay(r.salary_min, r.salary_max, 'USD', 'annual', 'salary_min/salary_max');
+          break;
+        case 'arbeitnow':
+          // ⚠️ `visa_sponsorship` NO se lee: medido el 2026-09-20, el filtro devuelve 146 ofertas
+          // que aparecen simultáneamente en ?visa_sponsorship=true y =false, y el objeto de cada
+          // oferta no trae campo alguno de visado. Es una señal rota.
+          company = r.company_name; url = r.url; id = r.slug ?? r.url; date = r.created_at; dateField = 'created_at';
+          description = r.description; location = optional(r.location);
+          contract = employmentType(Array.isArray(r.job_types) ? r.job_types[0] : r.job_types);
+          if (r.remote === true) mode = 'fully_remote';
+          if (Array.isArray(r.tags)) skills = r.tags.filter((t): t is string => typeof t === 'string' && !!t.trim()).slice(0, 30);
+          break;
+        case 'landingjobs':
+          // `relocation_paid` es un campo de primera clase: la señal de reubicación más limpia
+          // que publica cualquiera de las fuentes.
+          url = r.url; date = r.published_at; dateField = 'published_at';
+          description = r.role_description ?? r.main_requirements;
+          // Landing.jobs NO publica campo de empresa: el slug va en la ruta de la URL, con forma
+          // fija `/at/{empresa}/{puesto}`. Se deriva de ahí porque es determinista y verificable,
+          // no se inventa: si la ruta no tiene esa forma, la fila se rechaza.
+          company = optional(r.company_name) ?? (typeof r.company === 'object' && r.company ? optional(object(r.company).name) : undefined)
+            ?? (typeof r.url === 'string' ? /\/at\/([^/]+)\//.exec(r.url)?.[1]?.replace(/[-_]+/g, ' ').trim() : undefined) ?? source.company;
+          contract = employmentType(r.type);
+          if (Array.isArray(r.locations)) restrictions = r.locations.filter((l): l is string => typeof l === 'string' && !!l.trim());
+          location = r.remote === true ? (restrictions?.length ? `Remote; ${restrictions.join('; ')}` : 'Remote') : restrictions?.join('; ');
+          if (r.remote === true) mode = 'fully_remote';
+          if (Array.isArray(r.tags)) skills = r.tags.flatMap(t => typeof t === 'string' ? [t] : typeof t === 'object' && t ? [String(object(t).name ?? '')] : []).filter(Boolean).slice(0, 30);
+          if (typeof r.expires_at === 'string') expires = r.expires_at.slice(0, 10);
+          pay = aggregatorPay(r.gross_salary_low, r.gross_salary_high, r.currency_code, 'annual', 'gross_salary_low/high');
+          break;
         case 'rss': {
           url = r.link; id = r.guid ?? r.link; date = r.pubDate; dateField = 'pubDate'; description = r.description;
           company = r.company ?? source.company;
@@ -201,10 +308,31 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
       const externalId = typeof id === 'number' && Number.isSafeInteger(id) && id >= 0 ? String(id) : text(id, 1024);
       const observedAt = now.toISOString();
       const publishedAt = publication(date, now, source.adapter === 'rss');
-      const trustedAvailability = ['greenhouse', 'lever', 'ashby'].includes(source.adapter);
+      // Lo decide el registro, no una lista incrustada aquí: un agregador nuevo nace `ambiguous`
+      // por defecto y tiene que declararse autoritativo a propósito.
+      const trustedAvailability = source.availabilityTrust === 'listing';
+      /**
+       * Qué hace que la presencia en el feed valga como evidencia de disponibilidad.
+       *
+       * Para un board ATS, el listado ES el tablero de la empresa. Para un agregador NO basta, y
+       * comprobarlo por HTML tampoco funciona: medido el 2026-09-20, las 40 capturas de páginas
+       * de agregadores dieron 33 `no_structured_job_posting_found` y 0 verificadas, porque esas
+       * páginas no publican JSON-LD ligado a su propia URL.
+       *
+       * Lo que sí existe es una afirmación explícita del proveedor: Himalayas y Landing.jobs
+       * publican fecha de expiración por oferta. Registrarla no es inferir — es citar lo que el
+       * proveedor declara, y la evidencia lo dice con todas sus letras. Un agregador sin fecha de
+       * expiración se queda `ambiguous`: no hay nada que citar.
+       */
+      const listingEvidence = !trustedAvailability ? undefined
+        : ATS_ADAPTERS.includes(source.adapter as typeof ATS_ADAPTERS[number]) ? `public_ats_listing:${endpoint}#${externalId}`
+        : expires && Date.parse(expires) > now.getTime() ? `provider_expiry_assertion:${endpoint}#${externalId}@${expires}`
+        : undefined;
       // Se lee en la captura, cuando la descripción ya está en memoria y no cuesta una petición.
       const sponsorship = sponsorshipFromDescription(optional(description), observedAt);
-      const opportunity = parseOpportunity({ title: text(title, 500), company: text(company, 200), url: normalizedUrl, source: source.id, skills: [],
+      const opportunity = parseOpportunity({ title: text(title, 500), company: text(company, 200), url: normalizedUrl, source: source.id, skills: skills ?? [],
+        ...(levels?.length ? { seniority: levels } : {}),
+        ...(expires ? { expiresAt: expires } : {}),
         ...(optional(description) ? { description: optional(description) } : {}), ...(optional(location) ? { location: optional(location) } : {}),
         ...(mode !== undefined ? { remoteness: mode } : remote !== undefined ? { remote } : {}),
         ...(contract !== undefined ? { employmentType: contract } : {}),
@@ -214,13 +342,15 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
         ...(pay.evidence ? { payEvidence: pay.evidence } : {}),
         ...(sponsorship ? { sponsorship } : {}),
         ...(publishedAt ? { publishedAt, publicationEvidence: { url: normalizedUrl, observedAt, excerpt: JSON.stringify({ endpoint, field: dateField, value: date }).slice(0, 1000) } } : {}),
-        availability: { url: normalizedUrl, checkedAt: observedAt, outcome: trustedAvailability ? 'open' : 'ambiguous', httpStatus: 200,
-          evidence: trustedAvailability ? `public_ats_listing:${endpoint}#${externalId}` : 'feed_presence_does_not_confirm_availability' },
+        availability: { url: normalizedUrl, checkedAt: observedAt, outcome: listingEvidence ? 'open' : 'ambiguous', httpStatus: 200,
+          evidence: listingEvidence ?? 'feed_presence_does_not_confirm_availability' },
       });
       jobs.push({ opportunity, provenance: [{ sourceId: source.id, adapter: source.adapter, externalId, endpoint, originalUrl, observedAt,
         payloadHash: createHash('sha256').update(JSON.stringify(raw)).digest('hex'), ...(publishedAt ? { publicationField: dateField } : {}) }],
         warnings: [...(!publishedAt ? ['publication_missing_or_invalid'] : []), ...(!trustedAvailability ? ['availability_requires_capture'] : [])] });
     } catch { rejected++; }
   }
-  return { jobs, rejected };
+  // Himalayas documenta el cursor como forma preferida de paginar y garantiza no repetir filas.
+  const cursor = path !== null && typeof (payload as Record<string, unknown>).nextCursor === 'string' ? (payload as Record<string, string>).nextCursor : undefined;
+  return { jobs, rejected, ...(cursor ? { nextCursor: cursor } : {}) };
 }

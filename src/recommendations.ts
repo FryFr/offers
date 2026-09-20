@@ -9,6 +9,8 @@ const RESERVED_PER_KIND = 5;
 const RESERVED_FOR_SPONSORSHIP = 3;
 /** Tope del bono de recencia. Acotado a propósito: inclina, no decide. */
 const RECENCY_BONUS = 12;
+/** Tiers admitidos en el corte diario. */
+const DAILY_TIERS: readonly string[] = ['strong', 'possible'];
 
 /**
  * Corte diario. `dailyTarget` viene del perfil; la relevancia manda y la recencia solo inclina.
@@ -21,7 +23,10 @@ export function recommend(records: EvaluatedRecord[], options: { dailyTarget?: n
   const limit = options.dailyTarget ?? 20;
   const candidates = records.filter(r => r.evaluation.verification?.status === 'verified' && r.evaluation.screening.status !== 'discarded'
     && r.evaluation.expiration !== 'expired' && r.evaluation.screening.employment.status !== 'ineligible'
-    && r.evaluation.relevance.tier !== 'off_target').map(r => {
+    // Solo `strong` y `possible` entran al corte. `weak` significa "no encaja, pero no está
+    // descartada": rellenar hasta `dailyTarget` con esas es peor que entregar menos, porque
+    // entrena a hojear el digest en vez de leerlo. Todo lo verificado sigue yendo a Notion.
+    && DAILY_TIERS.includes(r.evaluation.relevance.tier)).map(r => {
     const e = r.evaluation;
     const { ageDays, windowDays } = e.verification;
     // Decae linealmente hasta el fin de la ventana. Sin fecha no se premia ni se castiga.

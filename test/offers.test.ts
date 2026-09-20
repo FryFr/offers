@@ -235,7 +235,8 @@ test('reevalúa reglas configuradas y selección diaria sin alterar el estado fu
   const state = ingest(empty(), verifiedOpportunity({ kind: 'employment', relocationRequired: false, compensation: { currency: 'USD', period: 'month', min: 2700 }, expiresAt: '2026-09-16' }));
   const before = JSON.stringify(state);
   assert.equal(report(state, profile, now).recommendations.length, 0);
-  const custom = parseProfile({ employmentMinimumMonthlyUsd: 2500, employmentTargetMonthlyUsd: 2700, relocationThresholdMonthlyUsd: 2600 });
+  // roleTerms hace que la oferta sea relevante: el corte diario solo admite strong/possible.
+  const custom = parseProfile({ employmentMinimumMonthlyUsd: 2500, employmentTargetMonthlyUsd: 2700, relocationThresholdMonthlyUsd: 2600, relevance: { roleTerms: ['developer'] } });
   const result = report(state, custom, now);
   assert.equal(result.recommendations.length, 1);
   assert.equal(result.records[0]?.evaluation.screening.employment.target.status, 'eligible');
@@ -267,7 +268,7 @@ test('verificación: ventana de 7 días inclusiva; >7 stale y prioridad de hoy s
   assert.equal(verification(windowBound, now, 3).validUntil, '2026-09-13T00:00:00.000Z');
   // La recencia inclina, no decide: una oferta de ayer claramente mejor gana a una de hoy floja.
   // Con la ventana de 7 días, lo contrario hundiría coincidencias perfectas bajo ruido fresco.
-  const today = verifiedOpportunity({ title: 'Today', skills: [] });
+  const today = verifiedOpportunity({ title: 'Today' });
   const older = verifiedOpportunity({ title: 'Yesterday', publishedAt: '2026-09-15', compensation: { currency: 'USD', period: 'hour', min: 100 } });
   const result = report(ingest(empty(), [older, today]), profile, now);
   assert.equal(result.recommendations[0]?.id, identity(older));

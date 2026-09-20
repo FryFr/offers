@@ -6,6 +6,8 @@ import { adaptSource, canonicalUrl, type CapturedJob } from './source-adapters.t
 import { type Source, sourceHeaders } from './source-registry.ts';
 import { safeRead, type SafeReadOptions } from './safe-http.ts';
 import { validateEnrichment, type Enricher, type Enrichment } from './claude-enrichment.ts';
+import { PUBLICATION_WINDOW_DAYS, classify } from './evaluate.ts';
+import { relevance } from './relevance.ts';
 import { matchesRegister } from './uk-sponsors.ts';
 
 export interface SourceHealth { sourceId: string; status: 'ok' | 'partial' | 'failed' | 'disabled' | 'not_due'; fetched: number; rejected: number; reason?: string; checkedAt: string }
@@ -44,21 +46,41 @@ export async function collectSource(source: Source, now: Date, options: SafeRead
     // (medido 2026-09-20: databricks 9,6 MB, anthropic 8,9 MB). El cap global de 2 MB existe para
     // no tragar respuestas enormes, no para prohibir un listado legítimo: se eleva solo donde hace
     // falta, con techo duro, en vez de renunciar a la descripción del 70% del pool.
-    const heavyListing = source.adapter === 'greenhouse' && source.fetchContent;
-    const response = await safeRead(endpoint, { ...options, headers: sourceHeaders(source, options.env ?? process.env),
+    // Arbeitnow entrega 250 ofertas con descripción en una sola respuesta: 2,21 MB medidos, justo
+    // por encima del cap. Un listado legítimo no debería quedar fuera por 200 KB.
+    const heavyListing = (source.adapter === 'greenhouse' && source.fetchContent) || source.adapter === 'arbeitnow';
+    const response = await safeRead(endpoint, { ...options, headers: { 'user-agent': USER_AGENT, ...sourceHeaders(source, options.env ?? process.env) },
       ...(heavyListing ? { maxBytes: 16_000_000, timeoutMs: 30_000 } : {}),
       contentTypes: source.adapter === 'rss' ? ['application/rss+xml', 'application/xml', 'text/xml'] : ['application/json'] });
     if (response.status !== 200) throw new Error(response.status === 429 ? 'source_rate_limited' : 'source_http_error');
     const adapted = adaptSource(source, response.body, now, response.finalUrl);
     rejected += adapted.rejected;
+    const paging = PAGINATION[source.adapter];
     for (const job of adapted.jobs) {
       const id = job.provenance[0]!.externalId;
-      if (seenIds.has(id) && source.adapter === 'lever' && page > 0) throw new Error('source_pagination_repeated');
+      // Un cursor o un offset que no avanza haría girar el bucle hasta el techo de páginas.
+      if (seenIds.has(id) && paging && page > 0) throw new Error('source_pagination_repeated');
       seenIds.add(id); jobs.push(job);
     }
-    if (source.adapter !== 'lever' || adapted.jobs.length + adapted.rejected < 100) break;
-    if (page === 49) throw new Error('source_page_limit');
-    const next = new URL(source.endpoint); next.searchParams.set('skip', String((page + 1) * 100)); endpoint = next.toString();
+    if (!paging || jobs.length >= MAX_ROWS_PER_SOURCE) break;
+    // La ventana de publicación acota el coste: cuando ninguna oferta FECHADA de la página cae
+    // dentro, seguir paginando solo trae material que el gate de frescura va a bloquear igual.
+    // Las ofertas sin fecha no cuentan como "dentro": si lo hicieran, un feed con fechas ausentes
+    // paginaría hasta el techo sin traer nada elegible.
+    const cutoff = now.getTime() - (PUBLICATION_WINDOW_DAYS + 1) * 86_400_000;
+    if (!adapted.jobs.some(job => job.opportunity.publishedAt && Date.parse(job.opportunity.publishedAt) >= cutoff)) break;
+    const next = new URL(source.endpoint);
+    if (paging.style === 'offset') {
+      if (adapted.jobs.length + adapted.rejected < paging.pageSize) break;
+      next.searchParams.set(paging.param, String((page + 1) * paging.pageSize));
+    } else {
+      if (!adapted.nextCursor) break;
+      next.searchParams.set(paging.param, adapted.nextCursor);
+    }
+    // Agotar el presupuesto de páginas es una parada normal, no un fallo: se tomaron las más
+    // frescas y se deja de pedir. Solo las páginas repetidas indican un cursor roto.
+    if (page + 1 >= MAX_PAGES) break;
+    endpoint = next.toString();
   }
   if (source.captureHtml) for (const [index, job] of jobs.entries()) {
     if (index >= 100) {
@@ -78,6 +100,30 @@ export async function collectSource(source: Source, now: Date, options: SafeRead
   }
   return { jobs, rejected };
 }
+/**
+ * Cómo pagina cada proveedor. Antes esto estaba incrustado en tres condicionales con el nombre
+ * "lever" dentro, así que un proveedor con cursor no tenía dónde encajar.
+ */
+type Pagination = { style: 'offset'; param: string; pageSize: number } | { style: 'cursor'; param: string };
+const PAGINATION: Partial<Record<Source['adapter'], Pagination>> = {
+  lever: { style: 'offset', param: 'skip', pageSize: 100 },
+  himalayas: { style: 'cursor', param: 'cursor' },
+};
+/** Techo por fuente y ciclo. Himalayas publica 105.000 ofertas: paginar hasta el fondo no es opción. */
+const MAX_ROWS_PER_SOURCE = 2_000;
+/** Peticiones por fuente y ciclo. Medido: Himalayas devuelve 20 filas por página, ignora `limit`. */
+const MAX_PAGES = 25;
+/**
+ * Capturas de evidencia HTML por ciclo sobre ofertas de fuentes no autoritativas. Cada una es una
+ * petición: el presupuesto acotado es lo que hace viable comprobar disponibilidad sin martillar
+ * a los proveedores ni alargar el ciclo.
+ */
+const RELEVANT_CAPTURE_BUDGET = 40;
+/**
+ * Identificación honesta del cliente. Arbeitnow responde 403 a peticiones sin user-agent
+ * (medido 2026-09-20); decir quién llama es cortesía con el proveedor, no disfraz.
+ */
+const USER_AGENT = 'offers-job-pipeline/1.0 (personal job search; contact via source repository)';
 export interface CycleOptions extends SafeReadOptions {
   sources: Source[]; profile: Profile; store?: Store; state?: SourceState; now?: Date;
   notionConfig?: unknown; env?: NodeJS.ProcessEnv; htmlFetch?: CaptureFetch; enrich?: Enricher;
@@ -125,6 +171,36 @@ export async function runSourceCycle(options: CycleOptions) {
       job.opportunity = parseOpportunity({ ...o, sponsorship: { status: 'employer_registered', scope: 'uk_skilled_worker',
         evidence: { kind: 'registry_match', source: 'uk_register_of_licensed_sponsors', quote: o.company, observedAt: checkedAt } } });
     }
+  }
+  /**
+   * La trampa de la disponibilidad. Un agregador es un espejo con retraso: su presencia no
+   * confirma que la vacante siga abierta, así que entra como `ambiguous` y el gate la bloquea
+   * para siempre. Sin resolver esto, añadir agregadores rinde CERO ofertas elegibles — es
+   * exactamente lo que le pasaba a Remotive, con 17 capturas y 17 bloqueos.
+   *
+   * La salida no es confiar en el feed, es comprobar. Y comprobar cuesta una petición por oferta,
+   * así que se comprueban solo las que ya pasaron el filtro determinista de relevancia: de miles
+   * de capturas a unas decenas por ciclo, ordenadas por lo que más le sirve a esta persona.
+   */
+  const pending = jobs.filter(job => job.opportunity.availability?.outcome === 'ambiguous'
+    && !job.warnings.includes('duplicate_conflict') && !job.warnings.includes('html_capture_budget'));
+  const worthChecking = pending
+    .map(job => ({ job, score: relevance(job.opportunity, options.profile, classify(job.opportunity).kind) }))
+    .filter(entry => entry.score.tier !== 'off_target')
+    .sort((a, b) => b.score.score - a.score.score || a.job.opportunity.url!.localeCompare(b.job.opportunity.url!))
+    .slice(0, RELEVANT_CAPTURE_BUDGET);
+  for (const { job } of worthChecking) {
+    try {
+      const capture = await captureEvidence(job.opportunity, { fetch: options.htmlFetch ?? createNodeCaptureFetch(), resolveHost: options.resolveHost, now: () => now });
+      if (capture.publishedAt && job.opportunity.publishedAt && capture.publishedAt !== job.opportunity.publishedAt) {
+        delete job.opportunity.publishedAt; delete job.opportunity.publicationEvidence;
+        job.opportunity.availability = { ...capture.availability, outcome: 'ambiguous', evidence: 'publication_conflict' };
+        job.warnings.push('publication_conflict');
+      } else {
+        job.opportunity.availability = capture.availability;
+        if (capture.publishedAt) { job.opportunity.publishedAt = capture.publishedAt; job.opportunity.publicationEvidence = capture.publicationEvidence; }
+      }
+    } catch { job.warnings.push('relevant_capture_failed'); }
   }
   const enrichments: Record<string, Enrichment> = {};
   let enrichedCount = 0;

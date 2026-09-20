@@ -133,6 +133,33 @@
       "enabled": true,
       "captureHtml": false,
       "minIntervalMinutes": 60
+    },
+    {
+      "id": "himalayas",
+      "adapter": "himalayas",
+      "enabled": true,
+      "availabilityTrust": "listing"
+    },
+    {
+      "id": "landingjobs",
+      "adapter": "landingjobs",
+      "enabled": true,
+      "availabilityTrust": "listing"
+    },
+    {
+      "id": "remoteok",
+      "adapter": "remoteok",
+      "enabled": true
+    },
+    {
+      "id": "jobicy",
+      "adapter": "jobicy",
+      "enabled": true
+    },
+    {
+      "id": "arbeitnow",
+      "adapter": "arbeitnow",
+      "enabled": true
     }
   ]
 }

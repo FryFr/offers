@@ -66,14 +66,19 @@ export function createPinnedTransport(maxBytes = 2_000_000, types = DEFAULT_TYPE
         if (!types.includes(type) || (responseHeaders['content-encoding'] && responseHeaders['content-encoding'] !== 'identity')) { response.destroy(); reject(new Error('unsupported_content_type')); return; }
         if (Number(responseHeaders['content-length']) > maxBytes) { response.destroy(); reject(new Error('response_too_large')); return; }
         const chunks: Buffer[] = []; let size = 0;
+        // Cortar el flujo por tamaño dispara 'aborted', que reportaba `fetch_failed` y enmascaraba
+        // la causa real: un diagnóstico equivocado manda a buscar problemas de red o de DNS donde
+        // solo había un límite superado. El motivo propio gana sobre el aborto que él mismo causa.
+        let cause: string | undefined;
+        const fail = (code: string) => { cause ??= code; reject(new Error(cause)); };
         response.on('data', (chunk: Buffer) => {
           size += chunk.length;
-          if (size > maxBytes) { response.destroy(); reject(new Error('response_too_large')); }
+          if (size > maxBytes) { cause = 'response_too_large'; response.destroy(); fail('response_too_large'); }
           else chunks.push(chunk);
         });
         response.on('end', () => finish(Buffer.concat(chunks).toString('utf8')));
-        response.on('error', () => reject(new Error('fetch_failed')));
-        response.on('aborted', () => reject(new Error('fetch_failed')));
+        response.on('error', () => fail('fetch_failed'));
+        response.on('aborted', () => fail('fetch_failed'));
       });
       request.on('error', () => reject(new Error('fetch_failed')));
       request.end();

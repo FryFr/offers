@@ -1,13 +1,41 @@
 import { validatePublicUrl } from './safe-http.ts';
 
-export type Adapter = 'remotive' | 'rss' | 'greenhouse' | 'lever' | 'ashby';
+/**
+ * Boards ATS: el propio tablero de la empresa. Que una vacante esté ahí SÍ es autoridad sobre
+ * su disponibilidad. Agregadores: espejos con retraso — su presencia no confirma nada.
+ */
+export const ATS_ADAPTERS = ['greenhouse', 'lever', 'ashby'] as const;
+export const AGGREGATOR_ADAPTERS = ['remotive', 'himalayas', 'jobicy', 'remoteok', 'arbeitnow', 'landingjobs'] as const;
+/** Una sola lista: el tipo se deriva de ella para que no puedan desincronizarse. */
+export const ADAPTERS = [...ATS_ADAPTERS, ...AGGREGATOR_ADAPTERS, 'rss'] as const;
+export type Adapter = typeof ADAPTERS[number];
+/**
+ * Cuánta autoridad tiene la presencia en el feed sobre la disponibilidad de la vacante.
+ * `listing` = el tablero de la empresa la lista hoy. `ambiguous` = hay que comprobarlo aparte.
+ */
+export type AvailabilityTrust = 'listing' | 'ambiguous';
 export interface Source {
   id: string; adapter: Adapter; enabled: boolean; endpoint: string;
   company?: string; board?: string; region?: 'global' | 'eu';
   secretEnv?: string; captureHtml: boolean; minIntervalMinutes: number; fetchContent: boolean;
+  availabilityTrust: AvailabilityTrust;
 }
-const adapters: Adapter[] = ['remotive', 'rss', 'greenhouse', 'lever', 'ashby'];
-const fields = ['id', 'adapter', 'enabled', 'endpoint', 'company', 'board', 'region', 'secretEnv', 'captureHtml', 'minIntervalMinutes', 'fetchContent'];
+const fields = ['id', 'adapter', 'enabled', 'endpoint', 'company', 'board', 'region', 'secretEnv', 'captureHtml', 'minIntervalMinutes', 'fetchContent', 'availabilityTrust'];
+/** Endpoints fijos por adaptador de agregador: el registro posee la URL, no la configuración. */
+const AGGREGATOR_ENDPOINTS: Record<string, string> = {
+  remotive: 'https://remotive.com/api/remote-jobs',
+  himalayas: 'https://himalayas.app/jobs/api?limit=100',
+  jobicy: 'https://jobicy.com/api/v2/remote-jobs?count=50',
+  remoteok: 'https://remoteok.com/api',
+  arbeitnow: 'https://www.arbeitnow.com/api/job-board-api',
+  landingjobs: 'https://landing.jobs/api/v1/jobs?limit=100',
+};
+/**
+ * Cadencia mínima por adaptador. Remotive pide explícitamente un máximo de ~4 llamadas diarias
+ * en sus términos; el resto se mantiene por encima de lo razonable para una API pública gratuita.
+ */
+const MIN_INTERVAL: Record<string, number> = { remotive: 360, himalayas: 120, jobicy: 180, remoteok: 180, arbeitnow: 120, landingjobs: 120 };
+const DEFAULT_INTERVAL: Record<string, number> = { remotive: 360, himalayas: 180, jobicy: 360, remoteok: 360, arbeitnow: 180, landingjobs: 180 };
 /** El techo protege el tiempo de ciclo y el tamaño del checkpoint, no la corrección. */
 export const MAX_SOURCES = 400;
 export function parseRegistry(value: unknown): Source[] {
@@ -19,13 +47,14 @@ export function parseRegistry(value: unknown): Source[] {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('source_invalid');
     const s = raw as Record<string, unknown>;
     if (Object.keys(s).some(k => !fields.includes(k)) || typeof s.id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(s.id) || ids.has(s.id)
-      || !adapters.includes(s.adapter as Adapter) || typeof s.enabled !== 'boolean' || (s.captureHtml !== undefined && typeof s.captureHtml !== 'boolean')
-      || (s.fetchContent !== undefined && typeof s.fetchContent !== 'boolean')) throw new Error('source_invalid');
+      || !ADAPTERS.includes(s.adapter as Adapter) || typeof s.enabled !== 'boolean' || (s.captureHtml !== undefined && typeof s.captureHtml !== 'boolean')
+      || (s.fetchContent !== undefined && typeof s.fetchContent !== 'boolean')
+      || (s.availabilityTrust !== undefined && !['listing', 'ambiguous'].includes(String(s.availabilityTrust)))) throw new Error('source_invalid');
     ids.add(s.id);
     const adapter = s.adapter as Adapter;
-    const interval = s.minIntervalMinutes ?? (adapter === 'remotive' ? 360 : 60);
+    const interval = s.minIntervalMinutes ?? DEFAULT_INTERVAL[adapter] ?? 60;
     const fetchContent = s.fetchContent === undefined ? true : s.fetchContent === true;
-    if (!Number.isSafeInteger(interval) || Number(interval) < (adapter === 'remotive' ? 360 : 15)) throw new Error('source_interval_invalid');
+    if (!Number.isSafeInteger(interval) || Number(interval) < (MIN_INTERVAL[adapter] ?? 15)) throw new Error('source_interval_invalid');
     if (s.company !== undefined && (typeof s.company !== 'string' || !s.company.trim() || s.company.length > 200)) throw new Error('source_company_invalid');
     if (s.region !== undefined && !['global', 'eu'].includes(String(s.region))) throw new Error('source_region_invalid');
     if (s.secretEnv !== undefined && (adapter !== 'rss' || typeof s.secretEnv !== 'string' || !/^OFFERS_SOURCE_[A-Z0-9_]+_TOKEN$/.test(s.secretEnv))) throw new Error('source_secret_reference_invalid');
@@ -41,16 +70,22 @@ export function parseRegistry(value: unknown): Source[] {
       endpoint = adapter === 'greenhouse' ? `https://boards-api.greenhouse.io/v1/boards/${s.board}/jobs${fetchContent ? '?content=true' : ''}`
         : adapter === 'lever' ? `https://api${s.region === 'eu' ? '.eu' : ''}.lever.co/v0/postings/${s.board}?mode=json&limit=100&skip=0`
         : `https://api.ashbyhq.com/posting-api/job-board/${s.board}`;
-    } else if (adapter === 'remotive') {
+    } else if (AGGREGATOR_ADAPTERS.includes(adapter as typeof AGGREGATOR_ADAPTERS[number])) {
+      // El registro fija el endpoint: una URL configurable convertiría un agregador conocido en
+      // un destino arbitrario y dejaría sin sentido el mapeo específico de su adaptador.
       if (s.endpoint !== undefined || s.board !== undefined) throw new Error('source_endpoint_invalid');
-      endpoint = 'https://remotive.com/api/remote-jobs';
+      endpoint = AGGREGATOR_ENDPOINTS[adapter]!;
     } else {
       if (typeof s.endpoint !== 'string') throw new Error('source_endpoint_invalid');
       const url = validatePublicUrl(s.endpoint);
       if (url.protocol !== 'https:' || url.search || url.hash) throw new Error('source_endpoint_invalid');
       endpoint = url.toString();
     }
-    return { id: s.id, adapter, enabled: s.enabled, endpoint, captureHtml: s.captureHtml === true, fetchContent, minIntervalMinutes: Number(interval),
+    // El default nace del adaptador, no de la configuración: olvidarlo en un agregador nuevo
+    // haría pasar por autoritativo un espejo con retraso.
+    const availabilityTrust = (s.availabilityTrust as AvailabilityTrust | undefined)
+      ?? (ATS_ADAPTERS.includes(adapter as typeof ATS_ADAPTERS[number]) ? 'listing' : 'ambiguous');
+    return { id: s.id, adapter, enabled: s.enabled, endpoint, captureHtml: s.captureHtml === true, fetchContent, minIntervalMinutes: Number(interval), availabilityTrust,
       ...(s.company ? { company: String(s.company).trim() } : {}), ...(s.board ? { board: String(s.board) } : {}),
       ...(s.region ? { region: s.region as 'global' | 'eu' } : {}), ...(s.secretEnv ? { secretEnv: String(s.secretEnv) } : {}) };
   });
