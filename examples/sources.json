@@ -9,21 +9,23 @@
       "minIntervalMinutes": 360
     },
     {
-      "id": "greenhouse-vercel",
-      "adapter": "greenhouse",
-      "board": "vercel",
-      "company": "Vercel",
-      "enabled": true,
-      "captureHtml": false,
-      "minIntervalMinutes": 60
-    },
-    {
       "id": "greenhouse-stripe",
       "adapter": "greenhouse",
       "board": "stripe",
       "company": "Stripe",
       "enabled": true,
       "captureHtml": false,
+      "fetchContent": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-anthropic",
+      "adapter": "greenhouse",
+      "board": "anthropic",
+      "company": "Anthropic",
+      "enabled": true,
+      "captureHtml": false,
+      "fetchContent": false,
       "minIntervalMinutes": 60
     },
     {
@@ -31,6 +33,100 @@
       "adapter": "greenhouse",
       "board": "databricks",
       "company": "Databricks",
+      "enabled": true,
+      "captureHtml": false,
+      "fetchContent": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-gitlab",
+      "adapter": "greenhouse",
+      "board": "gitlab",
+      "company": "GitLab",
+      "enabled": true,
+      "captureHtml": false,
+      "fetchContent": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-reddit",
+      "adapter": "greenhouse",
+      "board": "reddit",
+      "company": "Reddit",
+      "enabled": true,
+      "captureHtml": false,
+      "fetchContent": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-scaleai",
+      "adapter": "greenhouse",
+      "board": "scaleai",
+      "company": "Scale AI",
+      "enabled": true,
+      "captureHtml": false,
+      "fetchContent": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-robinhood",
+      "adapter": "greenhouse",
+      "board": "robinhood",
+      "company": "Robinhood",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-asana",
+      "adapter": "greenhouse",
+      "board": "asana",
+      "company": "Asana",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-figma",
+      "adapter": "greenhouse",
+      "board": "figma",
+      "company": "Figma",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-discord",
+      "adapter": "greenhouse",
+      "board": "discord",
+      "company": "Discord",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-nuro",
+      "adapter": "greenhouse",
+      "board": "nuro",
+      "company": "Nuro",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-airtable",
+      "adapter": "greenhouse",
+      "board": "airtable",
+      "company": "Airtable",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-vercel",
+      "adapter": "greenhouse",
+      "board": "vercel",
+      "company": "Vercel",
       "enabled": true,
       "captureHtml": false,
       "minIntervalMinutes": 60

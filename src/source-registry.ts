@@ -4,10 +4,10 @@ export type Adapter = 'remotive' | 'rss' | 'greenhouse' | 'lever' | 'ashby';
 export interface Source {
   id: string; adapter: Adapter; enabled: boolean; endpoint: string;
   company?: string; board?: string; region?: 'global' | 'eu';
-  secretEnv?: string; captureHtml: boolean; minIntervalMinutes: number;
+  secretEnv?: string; captureHtml: boolean; minIntervalMinutes: number; fetchContent: boolean;
 }
 const adapters: Adapter[] = ['remotive', 'rss', 'greenhouse', 'lever', 'ashby'];
-const fields = ['id', 'adapter', 'enabled', 'endpoint', 'company', 'board', 'region', 'secretEnv', 'captureHtml', 'minIntervalMinutes'];
+const fields = ['id', 'adapter', 'enabled', 'endpoint', 'company', 'board', 'region', 'secretEnv', 'captureHtml', 'minIntervalMinutes', 'fetchContent'];
 export function parseRegistry(value: unknown): Source[] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('registry_invalid');
   const registry = value as Record<string, unknown>;
@@ -17,10 +17,12 @@ export function parseRegistry(value: unknown): Source[] {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('source_invalid');
     const s = raw as Record<string, unknown>;
     if (Object.keys(s).some(k => !fields.includes(k)) || typeof s.id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(s.id) || ids.has(s.id)
-      || !adapters.includes(s.adapter as Adapter) || typeof s.enabled !== 'boolean' || (s.captureHtml !== undefined && typeof s.captureHtml !== 'boolean')) throw new Error('source_invalid');
+      || !adapters.includes(s.adapter as Adapter) || typeof s.enabled !== 'boolean' || (s.captureHtml !== undefined && typeof s.captureHtml !== 'boolean')
+      || (s.fetchContent !== undefined && typeof s.fetchContent !== 'boolean')) throw new Error('source_invalid');
     ids.add(s.id);
     const adapter = s.adapter as Adapter;
     const interval = s.minIntervalMinutes ?? (adapter === 'remotive' ? 360 : 60);
+    const fetchContent = s.fetchContent === undefined ? true : s.fetchContent === true;
     if (!Number.isSafeInteger(interval) || Number(interval) < (adapter === 'remotive' ? 360 : 15)) throw new Error('source_interval_invalid');
     if (s.company !== undefined && (typeof s.company !== 'string' || !s.company.trim() || s.company.length > 200)) throw new Error('source_company_invalid');
     if (s.region !== undefined && !['global', 'eu'].includes(String(s.region))) throw new Error('source_region_invalid');
@@ -28,7 +30,13 @@ export function parseRegistry(value: unknown): Source[] {
     let endpoint: string;
     if (['greenhouse', 'lever', 'ashby'].includes(adapter)) {
       if (typeof s.board !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(s.board) || !s.company || s.endpoint !== undefined) throw new Error('source_board_invalid');
-      endpoint = adapter === 'greenhouse' ? `https://boards-api.greenhouse.io/v1/boards/${s.board}/jobs?content=true`
+      // content=true inlines every posting's full HTML description and inflates the listing 7-22x.
+      // Measured 2026-09-19 (bare vs content=true): stripe 416KB/5.1MB, anthropic 437KB/8.9MB,
+      // databricks 752KB/9.6MB, gitlab 153KB/3.4MB — all four blew the 2MB safe-http cap and
+      // returned zero offers, while bare they all fit. Eligibility needs publishedAt, publication
+      // evidence and availability, never the description, so large boards can opt out and still
+      // produce verified offers. Defaults to true so existing sources keep their descriptions.
+      endpoint = adapter === 'greenhouse' ? `https://boards-api.greenhouse.io/v1/boards/${s.board}/jobs${fetchContent ? '?content=true' : ''}`
         : adapter === 'lever' ? `https://api${s.region === 'eu' ? '.eu' : ''}.lever.co/v0/postings/${s.board}?mode=json&limit=100&skip=0`
         : `https://api.ashbyhq.com/posting-api/job-board/${s.board}`;
     } else if (adapter === 'remotive') {
@@ -40,7 +48,7 @@ export function parseRegistry(value: unknown): Source[] {
       if (url.protocol !== 'https:' || url.search || url.hash) throw new Error('source_endpoint_invalid');
       endpoint = url.toString();
     }
-    return { id: s.id, adapter, enabled: s.enabled, endpoint, captureHtml: s.captureHtml === true, minIntervalMinutes: Number(interval),
+    return { id: s.id, adapter, enabled: s.enabled, endpoint, captureHtml: s.captureHtml === true, fetchContent, minIntervalMinutes: Number(interval),
       ...(s.company ? { company: String(s.company).trim() } : {}), ...(s.board ? { board: String(s.board) } : {}),
       ...(s.region ? { region: s.region as 'global' | 'eu' } : {}), ...(s.secretEnv ? { secretEnv: String(s.secretEnv) } : {}) };
   });
