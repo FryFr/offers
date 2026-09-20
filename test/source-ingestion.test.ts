@@ -72,7 +72,10 @@ test('greenhouse: el contenido doblemente escapado se reduce a texto sin markup 
   const content = '&lt;p&gt;Build &amp;amp; ship&amp;nbsp;services&lt;/p&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;ul&gt;&lt;li&gt;TypeScript&lt;/li&gt;&lt;/ul&gt;';
   const job = adaptSource(source('greenhouse'), JSON.stringify({ ...body, jobs: [{ ...body.jobs[0], content }] }), now).jobs[0]!;
   const description = job.opportunity.description!;
-  assert.equal(description, 'Build & ship services TypeScript');
+  // Las etiquetas de bloque se vuelven saltos de línea, no espacios: son el límite de oración.
+  // Sin ellos, una lista con viñetas se convierte en una sola frase de miles de caracteres y
+  // cualquier análisis por oración decide sobre texto que nunca estuvo junto.
+  assert.equal(description, 'Build & ship services\nTypeScript');
   assert.ok(!/<[a-z/]/i.test(description), 'sin etiquetas');
   assert.ok(!/&[a-z#0-9]{2,8};/i.test(description), 'sin entidades sin decodificar');
   assert.ok(!description.includes('alert'), 'el contenido de script no sobrevive');

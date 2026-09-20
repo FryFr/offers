@@ -5,6 +5,8 @@ export interface EvaluatedRecord { id: string; opportunity: Opportunity; evaluat
 
 /** Plazas reservadas por tipo conocido, para que freelance no desaparezca bajo el volumen de empleo. */
 const RESERVED_PER_KIND = 5;
+/** Plazas garantizadas para ofertas que declaran patrocinio de visado. */
+const RESERVED_FOR_SPONSORSHIP = 3;
 /** Tope del bono de recencia. Acotado a propósito: inclina, no decide. */
 const RECENCY_BONUS = 12;
 
@@ -31,16 +33,25 @@ export function recommend(records: EvaluatedRecord[], options: { dailyTarget?: n
       { points: e.screening.employment.status === 'eligible' || e.freelanceReview.status === 'meets_floor' ? 30 : 0, reason: '30 puntos si cumple elegibilidad de empleo o piso freelance' },
       { points: e.screening.employment.target.status === 'eligible' ? 20 : 0, reason: '20 puntos si alcanza objetivo mensual de empleo' },
       { points: recency, reason: ageDays === null ? 'Sin fecha de publicación: sin bono de recencia' : `Recencia: publicada hace ${ageDays} día(s) dentro de una ventana de ${windowDays}` },
+      { points: e.relevance.sponsorshipBonus, reason: e.relevance.sponsorshipBonus ? `Patrocinio de visado declarado (${r.opportunity.sponsorship?.scope ?? 'sin alcance'})` : 'Sin señal de patrocinio' },
     ];
-    return { id: r.id, kind: e.classification.kind, tier: e.relevance.tier, sameDay: e.verification.sameDay, priority: reasons.reduce((sum, x) => sum + x.points, 0), reasons };
+    return { id: r.id, kind: e.classification.kind, tier: e.relevance.tier, sameDay: e.verification.sameDay,
+      sponsors: r.opportunity.sponsorship?.status === 'stated', priority: reasons.reduce((sum, x) => sum + x.points, 0), reasons };
   }).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id));
 
-  const reserved = new Set(['employment', 'freelance'].flatMap(kind => candidates.filter(c => c.kind === kind).slice(0, RESERVED_PER_KIND).map(c => c.id)));
+  // Reservas: por tipo, para que freelance no desaparezca bajo el volumen de empleo; y por
+  // patrocinio, porque migrar es objetivo propio y un bono no garantiza nada — con suficientes
+  // vacantes locales bien puntuadas, las que patrocinan quedarían siempre fuera del corte.
+  const reserved = new Set([
+    ...['employment', 'freelance'].flatMap(kind => candidates.filter(c => c.kind === kind).slice(0, RESERVED_PER_KIND).map(c => c.id)),
+    ...candidates.filter(c => c.sponsors).slice(0, RESERVED_FOR_SPONSORSHIP).map(c => c.id),
+  ]);
   const selected = new Set<string>();
   for (const c of [...candidates.filter(c => reserved.has(c.id)), ...candidates.filter(c => !reserved.has(c.id))]) {
     if (selected.size >= limit) break;
     selected.add(c.id);
   }
   return candidates.filter(c => selected.has(c.id)).map((c, index) => ({ ...c, rank: index + 1,
-    selectionReason: reserved.has(c.id) ? `Entre los primeros ${RESERVED_PER_KIND} de su tipo; reserva de balance` : 'Seleccionada por prioridad en plazas restantes' }));
+    selectionReason: !reserved.has(c.id) ? 'Seleccionada por prioridad en plazas restantes'
+      : c.sponsors ? 'Reserva de patrocinio de visado' : `Entre los primeros ${RESERVED_PER_KIND} de su tipo; reserva de balance` }));
 }

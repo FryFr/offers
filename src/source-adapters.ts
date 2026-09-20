@@ -3,6 +3,7 @@ import { parseOpportunity, type Opportunity } from './contracts.ts';
 import type { Source } from './source-registry.ts';
 import { validatePublicUrl } from './safe-http.ts';
 import { parseRss } from './rss.ts';
+import { sponsorshipFromDescription } from './sponsorship.ts';
 
 export interface Provenance { sourceId: string; adapter: Source['adapter']; externalId: string; endpoint: string; originalUrl: string; observedAt: string; payloadHash: string; publicationField?: string }
 export interface CapturedJob { opportunity: Opportunity; provenance: Provenance[]; warnings: string[] }
@@ -103,8 +104,16 @@ const DESCRIPTION_LIMIT = 20_000;
 const decodeEntities = (value: string) => value
   .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"')
   .replace(/&#0?39;|&apos;/gi, "'").replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&');
+/**
+ * Etiquetas de bloque que separan ideas. Colapsarlas a un espacio convierte una lista con
+ * viñetas en una sola oración de miles de caracteres, y cualquier análisis por oración —el de
+ * patrocinio, por ejemplo— pasa a decidir sobre un texto donde "no patrocinamos" y "metas de
+ * ventas" viven en la misma frase. Se traducen a salto de línea.
+ */
+const BLOCK_BOUNDARY = /<\/?(p|br|li|ul|ol|div|h[1-6]|tr|td|table|section|article|header|footer|blockquote|dd|dt)\b[^>]*>/gi;
 const stripTags = (value: string) => value
   .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+  .replace(BLOCK_BOUNDARY, '\n')
   .replace(/<[^>]*>/g, ' ');
 function htmlToText(raw: string): string {
   // Dos pasadas, quitando etiquetas entre ambas: el contenido llega DOBLEMENTE escapado y una
@@ -112,7 +121,10 @@ function htmlToText(raw: string): string {
   // provenientes de `&amp;nbsp;`). Quitar etiquetas entre pasadas evita que la segunda
   // decodificación reconstruya markup que ya nadie iba a revisar.
   return stripTags(decodeEntities(stripTags(decodeEntities(raw))))
-    .replace(/\s+/g, ' ')
+    // Se colapsa el espacio horizontal pero se conservan los saltos: son el límite de oración.
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .replace(/\n{2,}/g, '\n')
     .trim()
     .slice(0, DESCRIPTION_LIMIT);
 }
@@ -190,6 +202,8 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
       const observedAt = now.toISOString();
       const publishedAt = publication(date, now, source.adapter === 'rss');
       const trustedAvailability = ['greenhouse', 'lever', 'ashby'].includes(source.adapter);
+      // Se lee en la captura, cuando la descripción ya está en memoria y no cuesta una petición.
+      const sponsorship = sponsorshipFromDescription(optional(description), observedAt);
       const opportunity = parseOpportunity({ title: text(title, 500), company: text(company, 200), url: normalizedUrl, source: source.id, skills: [],
         ...(optional(description) ? { description: optional(description) } : {}), ...(optional(location) ? { location: optional(location) } : {}),
         ...(mode !== undefined ? { remoteness: mode } : remote !== undefined ? { remote } : {}),
@@ -198,6 +212,7 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
         ...(pay.compensation ? { compensation: pay.compensation } : {}),
         payDisclosure: pay.disclosure,
         ...(pay.evidence ? { payEvidence: pay.evidence } : {}),
+        ...(sponsorship ? { sponsorship } : {}),
         ...(publishedAt ? { publishedAt, publicationEvidence: { url: normalizedUrl, observedAt, excerpt: JSON.stringify({ endpoint, field: dateField, value: date }).slice(0, 1000) } } : {}),
         availability: { url: normalizedUrl, checkedAt: observedAt, outcome: trustedAvailability ? 'open' : 'ambiguous', httpStatus: 200,
           evidence: trustedAvailability ? `public_ats_listing:${endpoint}#${externalId}` : 'feed_presence_does_not_confirm_availability' },

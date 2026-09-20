@@ -215,6 +215,19 @@ SHA-256 de la primera identidad disponible: `(source, externalId)`; de lo contra
 - `Compensation.period` admite `hour|day|week|month|year|project`. La normalización vive en **un solo lugar** (`src/compensation.ts`): antes estaba duplicada con dos matemáticas divergentes entre `screening` y `evaluate`.
 - `src/fx.ts` convierte monedas con una tabla **estática, versionada y fechada**. No es cotización y cada cifra derivada lo dice. Una prueba falla cuando la tabla supera los 180 días, para que la refresque una persona. Una moneda fuera de la tabla no se estima: se deja sin evaluar.
 
+### Patrocinio de visado
+
+`sponsorship` distingue dos cosas que no deben confundirse: `stated` es **la oferta afirmando por escrito** que patrocina, y `employer_registered` es solo que el empleador figura en el registro oficial británico de patrocinadores con licencia. Lo segundo es un dato administrativo, no una promesa sobre ese puesto, y pesa mucho menos en el ranking.
+
+La lectura del texto es **por proximidad a una mención migratoria inequívoca**, no por lista de frases. Dos razones medidas sobre ofertas reales:
+
+- `sponsor` y `sponsorship` a secas aparecen fuera del contexto migratorio ("named executive sponsors", patrocinio de eventos). La mención debe ser de visado, permiso de trabajo o autorización de empleo.
+- La misma frase "visa sponsorship" encabeza tanto la promesa como la negativa. Una afirmación solo cuenta si nada la niega justo antes, de modo que *"We do sponsor visas! However, we aren't able to…"* es positiva y *"visa sponsorship is not available"* es negativa. Y la negación debe recaer **sobre el patrocinio**: el boilerplate legal *"immigration compliance… will be not used as a criterion"* no dice nada sobre patrocinar.
+
+Toda señal guarda la **cita literal**, y el contrato rechaza una cita que no aparezca en la descripción. "No hay señal" nunca significa "no patrocina".
+
+`npm run sources -- --refresh-sponsors` descarga el registro británico (cadencia semanal). El enlace del CSV lleva un hash que cambia en cada edición, así que se extrae de la página en vez de fijarlo. El cruce es conservador: nombre normalizado exacto, ubicación británica obligatoria, sin nombres genéricos y **nunca difuso** — un falso positivo aquí le afirma a alguien que una empresa puede patrocinarlo cuando no.
+
 El gate de elegibilidad **no se afloja**: solo acepta una cifra mensual que no descanse en horas supuestas. La proyección con las horas del perfil y las conversiones de moneda alimentan una decisión paralela `indicative`, que ordena pero nunca decide.
 
 La ingesta hace upsert: el último objeto de una identidad reemplaza completamente el actual, no es un patch. Las versiones anteriores se conservan en `history`, con su evidencia de publicación y disponibilidad, **acotadas a las `MAX_HISTORY` (5) revisiones más recientes por registro**: sin ese tope, un cambio de contrato reescribe miles de registros a la vez y el store crece sin techo. Las revisiones descartadas son las más antiguas; el store no reconstruye lecturas anteriores a ese corte. Repetir la entrada actual no agrega registros ni historial; con `--now` fijo también es idéntico el reporte. El estado almacena datos fuente, no scores desactualizados; todo se reevalúa con el perfil y fecha actuales. No se borra lo que falta en un lote nuevo.

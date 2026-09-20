@@ -1,11 +1,12 @@
 import { captureEvidence, createNodeCaptureFetch, type CaptureFetch } from './evidence-capture.ts';
-import { type Opportunity, type Profile } from './contracts.ts';
+import { parseOpportunity, type Opportunity, type Profile } from './contracts.ts';
 import { identity, ingest, report, type Store } from './pipeline.ts';
 import { planNotionSync, validateNotionConfig } from './notion-sync.ts';
 import { adaptSource, canonicalUrl, type CapturedJob } from './source-adapters.ts';
 import { type Source, sourceHeaders } from './source-registry.ts';
 import { safeRead, type SafeReadOptions } from './safe-http.ts';
 import { validateEnrichment, type Enricher, type Enrichment } from './claude-enrichment.ts';
+import { matchesRegister } from './uk-sponsors.ts';
 
 export interface SourceHealth { sourceId: string; status: 'ok' | 'partial' | 'failed' | 'disabled' | 'not_due'; fetched: number; rejected: number; reason?: string; checkedAt: string }
 export interface SourceState { version: 1; lastAttempt: Record<string, string>; lastResult?: Record<string, 'ok' | 'partial' | 'failed'> }
@@ -80,6 +81,8 @@ export async function collectSource(source: Source, now: Date, options: SafeRead
 export interface CycleOptions extends SafeReadOptions {
   sources: Source[]; profile: Profile; store?: Store; state?: SourceState; now?: Date;
   notionConfig?: unknown; env?: NodeJS.ProcessEnv; htmlFetch?: CaptureFetch; enrich?: Enricher;
+  /** Índice del registro británico de patrocinadores; ausente, el cruce simplemente no ocurre. */
+  sponsorRegister?: ReadonlySet<string>;
   mode?: 'dry-run';
 }
 export async function runSourceCycle(options: CycleOptions) {
@@ -113,6 +116,16 @@ export async function runSourceCycle(options: CycleOptions) {
     }
   }
   const jobs = deduplicate(captures);
+  // Cruce con el registro oficial británico. Solo llena el hueco: una oferta que YA declara por
+  // escrito que patrocina no se degrada a un dato administrativo del empleador.
+  if (options.sponsorRegister?.size) {
+    for (const job of jobs) {
+      const o = job.opportunity;
+      if (o.sponsorship || !matchesRegister(o.company, o.location, options.sponsorRegister)) continue;
+      job.opportunity = parseOpportunity({ ...o, sponsorship: { status: 'employer_registered', scope: 'uk_skilled_worker',
+        evidence: { kind: 'registry_match', source: 'uk_register_of_licensed_sponsors', quote: o.company, observedAt: checkedAt } } });
+    }
+  }
   const enrichments: Record<string, Enrichment> = {};
   let enrichedCount = 0;
   for (const job of jobs) if (options.enrich && job.opportunity.description && !job.warnings.includes('duplicate_conflict')) {

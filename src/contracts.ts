@@ -37,6 +37,22 @@ export type EmploymentType = typeof EMPLOYMENT_TYPES[number];
 export const PAY_DISCLOSURES = ['published', 'not_published', 'unparsed'] as const;
 export type PayDisclosure = typeof PAY_DISCLOSURES[number];
 export interface PayEvidence { field: string; raw: string; converted?: boolean }
+export const SPONSORSHIP_SCOPES = ['uk_skilled_worker', 'eu', 'us_h1b', 'unspecified'] as const;
+export type SponsorshipScope = typeof SPONSORSHIP_SCOPES[number];
+/**
+ * `stated` es la oferta afirmando que patrocina. `employer_registered` es OTRA cosa y vale
+ * bastante menos: significa "este empleador figura en un registro oficial de patrocinadores",
+ * no "este puesto patrocina". Confundirlos convertiría un dato administrativo en una promesa.
+ */
+export const SPONSORSHIP_STATUSES = ['stated', 'employer_registered', 'stated_none', 'unknown'] as const;
+export type SponsorshipStatus = typeof SPONSORSHIP_STATUSES[number];
+export const SPONSORSHIP_EVIDENCE_KINDS = ['description_phrase', 'registry_match', 'provider_field'] as const;
+export interface SponsorshipSignal {
+  status: SponsorshipStatus;
+  scope?: SponsorshipScope;
+  /** `quote` es texto literal de la fuente; el parser comprueba que la descripción lo contenga. */
+  evidence: { kind: typeof SPONSORSHIP_EVIDENCE_KINDS[number]; source: string; quote: string; observedAt: string };
+}
 export interface Opportunity {
   title: string;
   company: string;
@@ -57,6 +73,7 @@ export interface Opportunity {
   compensation?: Compensation;
   payDisclosure?: PayDisclosure;
   payEvidence?: PayEvidence;
+  sponsorship?: SponsorshipSignal;
   expiresAt?: string;
   publishedAt?: string;
   publicationEvidence?: PublicationEvidence;
@@ -164,8 +181,8 @@ export function parseAvailability(value: unknown): AvailabilityEvidence {
  */
 export const OPPORTUNITY_KEYS = ['title', 'company', 'description', 'source', 'externalId', 'url', 'kind', 'skills',
   'remote', 'remoteness', 'seniority', 'employmentType', 'locationRestrictions', 'relocationRequired', 'location',
-  'industry', 'compensation', 'payDisclosure', 'payEvidence', 'expiresAt', 'publishedAt', 'publicationEvidence',
-  'availability', 'recurring', 'growthPotential'] as const;
+  'industry', 'compensation', 'payDisclosure', 'payEvidence', 'sponsorship', 'expiresAt', 'publishedAt',
+  'publicationEvidence', 'availability', 'recurring', 'growthPotential'] as const;
 export function parseOpportunity(value: unknown): Opportunity {
   const v = object(value, 'opportunity');
   const unknownKey = Object.keys(v).find(k => !OPPORTUNITY_KEYS.includes(k as typeof OPPORTUNITY_KEYS[number]));
@@ -205,6 +222,17 @@ export function parseOpportunity(value: unknown): Opportunity {
   if (v.payEvidence !== undefined) {
     const e = object(v.payEvidence, 'payEvidence');
     o.payEvidence = { field: str(e.field, 'payEvidence.field'), raw: str(e.raw, 'payEvidence.raw'), ...(e.converted !== undefined ? { converted: bool(e.converted, 'payEvidence.converted') } : {}) };
+  }
+  if (v.sponsorship !== undefined) {
+    const s = object(v.sponsorship, 'sponsorship');
+    const e = object(s.evidence, 'sponsorship.evidence');
+    const quote = str(e.quote, 'sponsorship.evidence.quote').slice(0, 1000);
+    const status = oneOf(s.status, SPONSORSHIP_STATUSES, 'sponsorship.status');
+    // La cita debe existir LITERALMENTE en la descripción. Sin esto, "la oferta dice que
+    // patrocina" degenera en "alguien escribió que lo dice" y la procedencia deja de valer.
+    if (e.kind === 'description_phrase' && !(o.description ?? '').includes(quote)) throw new Error('sponsorship: la cita no aparece en la descripción');
+    o.sponsorship = { status, ...(s.scope !== undefined ? { scope: oneOf(s.scope, SPONSORSHIP_SCOPES, 'sponsorship.scope') } : {}),
+      evidence: { kind: oneOf(e.kind, SPONSORSHIP_EVIDENCE_KINDS, 'sponsorship.evidence.kind'), source: str(e.source, 'sponsorship.evidence.source'), quote, observedAt: timestamp(e.observedAt, 'sponsorship.evidence.observedAt') } };
   }
   // `remote` se conserva por compatibilidad pero deriva de `remoteness` cuando ambos vienen:
   // dos fuentes de verdad en desacuerdo son un error del adaptador, no un dato que promediar.

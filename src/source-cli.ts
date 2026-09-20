@@ -10,6 +10,8 @@ import { createClaudeEnricher } from './claude-enrichment.ts';
 import { upsertNotionRecords, validateNotionConfig, type HttpTransport } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
 import type { Provenance } from './source-adapters.ts';
+import { fetchRegister, registerIndex, type SponsorRegister } from './uk-sponsors.ts';
+import type { SafeReadOptions } from './safe-http.ts';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const json = async (path: string): Promise<unknown> => JSON.parse(await readFile(path, 'utf8'));
@@ -40,8 +42,12 @@ export async function runSources(options: { root?: string; enrichModel?: string;
     // Dry-run only plans; force enabled:false so an enabled data/notion-local.json config cannot trip runSourceCycle's write guard.
     const dryRunNotionConfig = local?.schemaVerified === true && local.config && typeof local.config === 'object'
       ? { ...local.config as Record<string, unknown>, enabled: false } : undefined;
+    // El registro es opcional: si nunca se corrió `--refresh-sponsors`, el ciclo funciona igual
+    // y simplemente no aporta la señal `employer_registered`.
+    const sponsors = await optionalJson(join(data, 'uk-sponsors.json')) as SponsorRegister | undefined;
     const result = await runSourceCycle({ ...options.dependencies, sources, profile, store, state, now: options.now,
-      notionConfig: dryRunNotionConfig, enrich, mode: 'dry-run' });
+      notionConfig: dryRunNotionConfig, enrich, mode: 'dry-run',
+      ...(sponsors?.organisations?.length ? { sponsorRegister: registerIndex(sponsors) } : {}) });
     const provenance = { ...(prior?.provenance as Record<string, Provenance[]> | undefined) };
     for (const job of result.jobs) {
       const key = job.opportunity.url!;
@@ -76,6 +82,17 @@ function trackHeapPeak(intervalMs = 250) {
   const timer = setInterval(sample, intervalMs);
   timer.unref();
   return () => { clearInterval(timer); sample(); return Math.round(peak / 1_048_576); };
+}
+/**
+ * Refresca el registro británico de patrocinadores. Va aparte del ciclo y con cadencia semanal:
+ * es una descarga de ~11 MB que cambia unas pocas veces por semana, no un feed horario.
+ */
+export async function refreshSponsors(options: { root?: string; now?: Date; dependencies?: SafeReadOptions } = {}) {
+  const root = options.root ?? repositoryRoot, data = join(root, 'data');
+  await mkdir(data, { recursive: true, mode: 0o700 });
+  const register = await fetchRegister(options.now ?? new Date(), options.dependencies ?? {});
+  await atomicMailWrite(join(data, 'uk-sponsors.json'), register);
+  return { organisations: register.organisations.length, sourceUrl: register.sourceUrl, fetchedAt: register.fetchedAt };
 }
 export type HealthReason = 'no_checkpoint' | 'checkpoint_degraded';
 export async function sourceHealth(root = repositoryRoot, now = new Date()) {
@@ -115,7 +132,7 @@ export async function runNotionSync(options: { root?: string; now?: Date; depend
 }
 export async function sourcesMain(args: string[], root = repositoryRoot): Promise<number> {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('npm run sources -- --dry-run [--enrich-model MODEL]\nnpm run sources -- --health\nnpm run sources -- --sync\n'
+    console.log('npm run sources -- --dry-run [--enrich-model MODEL]\nnpm run sources -- --health\nnpm run sources -- --sync\nnpm run sources -- --refresh-sponsors\n'
       + 'Fixed repository config. --sync requires data/notion-local.json with schemaVerified:true and an enabled config, plus a fresh healthy checkpoint from --dry-run; it reads the existing store/profile without recollecting sources and writes only through the existing Notion transport (NOTION_API_KEY). Result counts are saved to data/notion-sync.json.\n'
       + '--sync exits: 0 synced, 2 invalid arguments, 3 occupied lock, 4 sync failure, 5 sync disabled (unverified schema or disabled config), 6 stale/unhealthy checkpoint, 7 synced with failed records.');
     return 0;
@@ -128,6 +145,10 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       // en cada instalación limpia hasta que el primer --dry-run complete.
       return health.healthy || health.reason === 'no_checkpoint' ? 0 : 4;
     } catch { console.error('source_health_unavailable'); return 4; }
+  }
+  if (args.length === 1 && args[0] === '--refresh-sponsors') {
+    try { console.log(JSON.stringify(await refreshSponsors({ root }))); return 0; }
+    catch (error) { console.error(error instanceof Error && ['register_page_unavailable', 'register_link_not_found', 'register_download_failed', 'register_header_unexpected', 'register_empty'].includes(error.message) ? error.message : 'sponsors_refresh_failed'); return 4; }
   }
   if (args.length === 1 && args[0] === '--sync') {
     try {

@@ -18,6 +18,12 @@ export interface Relevance {
   roleMatched: string[];
   skillsMatched: string[];
   blockers: string[];
+  /**
+   * Bonificación por patrocinio de visado, FUERA de los 100 puntos del score. Se suma en el
+   * ranking para que no desplace al ajuste de rol: migrar es valiosísimo, pero una vacante que
+   * patrocina y no encaja con el perfil sigue sin servir.
+   */
+  sponsorshipBonus: number;
 }
 
 /** Vocabulario de seniority: es del mercado, no de la persona, por eso no se configura. */
@@ -71,8 +77,16 @@ function geography(o: Opportunity, relocationTargets: readonly string[]): { poin
   }
   if (!locationText && o.remote === undefined) return { points: 7, signal: { points: 7, reason: 'Modalidad no declarada; no se infiere' } };
   const target = matchedTerms(locationText, relocationTargets);
-  // Presencial en destino de migración sigue vivo: es exactamente donde vive el sponsorship.
-  if (target.length) return { points: 6, signal: { points: 6, reason: `Presencial en destino de reubicación (${target.join(', ')})`, evidence: quote('location', o.location ?? '') } };
+  if (target.length) {
+    // Un presencial en destino solo sirve por la vía de reubicación. Si la propia oferta dice
+    // que NO patrocina, esa vía está cerrada y la vacante es inaplicable desde Colombia.
+    if (o.sponsorship?.status === 'stated_none') {
+      return { points: 0, blocker: 'onsite_target_without_sponsorship', signal: { points: 0, reason: 'Presencial en destino, pero la oferta declara que no patrocina visado', evidence: quote('sponsorship', o.sponsorship.evidence.quote) } };
+    }
+    const stated = o.sponsorship?.status === 'stated';
+    const points = stated ? 12 : 6;
+    return { points, signal: { points, reason: `Presencial en destino de reubicación (${target.join(', ')})${stated ? ' con patrocinio declarado' : '; patrocinio sin confirmar'}`, evidence: quote('location', o.location ?? '') } };
+  }
   return { points: 0, blocker: 'onsite_outside_relocation_targets', signal: { points: 0, reason: 'Presencial fuera de los destinos de reubicación', evidence: quote('location', o.location ?? '') } };
 }
 
@@ -136,7 +150,12 @@ export function relevance(o: Opportunity, p: Profile, kind: Kind): Relevance {
   // Un tipo explícitamente fuera de los preferidos no bloquea, pero tampoco se premia.
   if (kind !== 'unknown' && !p.preferredKinds.includes(kind)) signals.push({ points: 0, reason: `Tipo ${kind} fuera de los preferidos` });
 
+  // `employer_registered` vale mucho menos que `stated`: dice que el empleador figura en un
+  // registro oficial, no que ESTE puesto patrocine. Nunca se equiparan.
+  const sponsorshipBonus = o.sponsorship?.status === 'stated' ? 25 : o.sponsorship?.status === 'employer_registered' ? 8 : 0;
+  if (sponsorshipBonus) signals.push({ points: 0, reason: `Patrocinio ${o.sponsorship!.status} (${o.sponsorship!.scope ?? 'sin alcance'}); bono de ranking ${sponsorshipBonus}`, evidence: quote('sponsorship', o.sponsorship!.evidence.quote) });
+
   const score = clamp(rolePoints + seniorityPoints + skillPoints + geo.points);
   const tier: RelevanceTier = blockers.length ? 'off_target' : score >= 65 ? 'strong' : score >= 40 ? 'possible' : 'weak';
-  return { score, tier, signals, roleMatched, skillsMatched, blockers };
+  return { score, tier, signals, roleMatched, skillsMatched, blockers, sponsorshipBonus };
 }
