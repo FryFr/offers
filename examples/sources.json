@@ -1,10 +1,48 @@
 {
   "version": 1,
   "sources": [
-    { "id": "remotive", "adapter": "remotive", "enabled": true, "captureHtml": false, "minIntervalMinutes": 360 },
-    { "id": "jobscollider", "adapter": "rss", "endpoint": "https://jobscollider.com/remote-jobs.rss", "enabled": true, "captureHtml": true, "minIntervalMinutes": 60 },
-    { "id": "greenhouse-vercel", "adapter": "greenhouse", "board": "vercel", "company": "Vercel", "enabled": true, "captureHtml": true, "minIntervalMinutes": 60 },
-    { "id": "lever-example", "adapter": "lever", "board": "REPLACE_ME", "company": "REPLACE_ME", "region": "global", "enabled": false, "captureHtml": false },
-    { "id": "ashby-example", "adapter": "ashby", "board": "REPLACE_ME", "company": "REPLACE_ME", "enabled": false, "captureHtml": false }
+    {
+      "id": "remotive",
+      "adapter": "remotive",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 360
+    },
+    {
+      "id": "greenhouse-vercel",
+      "adapter": "greenhouse",
+      "board": "vercel",
+      "company": "Vercel",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-stripe",
+      "adapter": "greenhouse",
+      "board": "stripe",
+      "company": "Stripe",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "greenhouse-databricks",
+      "adapter": "greenhouse",
+      "board": "databricks",
+      "company": "Databricks",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    },
+    {
+      "id": "ashby-linear",
+      "adapter": "ashby",
+      "board": "linear",
+      "company": "Linear",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 60
+    }
   ]
 }

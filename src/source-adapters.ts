@@ -53,8 +53,16 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
         case 'remotive':
           company = r.company_name; url = r.url; date = r.publication_date; dateField = 'publication_date'; description = r.description; location = r.candidate_required_location; remote = true; break;
         case 'greenhouse':
-          url = r.absolute_url; description = r.content; location = r.location && object(r.location).name; break;
+          // first_published, NOT updated_at: the board rewrites updated_at continuously, so it
+          // reports every posting as fresh. Measured 2026-09-19 on boards/vercel/jobs (84 jobs):
+          // updated_at <=3d for 84/84 (median 2d) while first_published <=3d for 4/84 (median 71d).
+          // Using updated_at would let a 71-day-old posting clear the three-day freshness gate.
+          url = r.absolute_url; date = r.first_published; dateField = 'first_published';
+          description = r.content; location = r.location && object(r.location).name; break;
         case 'lever':
+          // No date: Lever's createdAt is epoch milliseconds (a number) and publication() only
+          // accepts ISO-8601 strings, so wiring it here would silently yield undefined. Needs a
+          // converter plus a real-board measurement before it can be trusted — not done yet.
           title = r.text; url = r.hostedUrl; description = r.descriptionPlain; location = r.categories && object(r.categories).location;
           remote = r.workplaceType === 'remote' ? true : r.workplaceType === 'on-site' ? false : undefined; break;
         case 'ashby':
