@@ -1,9 +1,8 @@
 import type { Kind, Opportunity, Profile } from './contracts.ts';
+import { canonical, contains } from './text.ts';
 
 type Status = 'eligible' | 'ineligible' | 'unknown' | 'not_applicable';
 interface Decision { status: Status; reason: string }
-const canonical = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-const contains = (text: string, term: string) => term.length > 0 && ` ${text} `.includes(` ${term} `);
 
 export function screen(o: Opportunity, p: Profile, kind: Kind) {
   const text = canonical([o.title, o.company, o.description, o.industry, ...o.skills].filter(Boolean).join(' '));

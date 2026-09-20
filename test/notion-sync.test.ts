@@ -167,9 +167,9 @@ test('CLI Notion: dry-run local, flags explícitos y configuración sin reflejar
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('Notion: límite de 3 días y evidencia ausente; bloqueados hacen cero llamadas incluso a query', async () => {
-  for (const [day, allowed] of [[16, true], [15, true], [14, true], [13, true], [12, false]] as const) {
-    const row = { ...records[0]!, opportunity: { ...records[0]!.opportunity, publishedAt: `2026-09-${day}` } };
+test('Notion: ventana de publicación y evidencia ausente; bloqueados hacen cero llamadas incluso a query', async () => {
+  for (const [day, allowed] of [[16, true], [12, true], [9, true], [8, false]] as const) {
+    const row = { ...records[0]!, opportunity: { ...records[0]!.opportunity, publishedAt: `2026-09-${String(day).padStart(2, '0')}` } };
     let calls = 0;
     const result = await upsertNotionRecords([row], config, async req => { calls++; return req.url.endsWith('/query') ? list() : { status: 200, body: { object: 'page', id: 'ok' } }; });
     assert.equal(result.created, allowed ? 1 : 0);

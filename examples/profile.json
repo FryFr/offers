@@ -1,9 +1,67 @@
 {
-  "skills": ["typescript", "node.js"],
-  "preferredKinds": ["employment", "freelance"],
+  "skills": [
+    "typescript", "javascript", "node.js", "react", "next.js", "go",
+    "python", "postgresql", "docker", "kubernetes", "aws", "terraform",
+    "graphql", "rest api", "microservices", "ci/cd", "testing"
+  ],
+  "preferredKinds": ["freelance", "employment"],
   "remoteOnly": true,
-  "targetHourlyUsd": 35,
-  "freelanceFloorHourlyUsd": 25,
-  "attractiveProjectBudgetUsd": 2000,
-  "hoursPerMonth": 160
+  "targetHourlyUsd": 40,
+  "freelanceFloorHourlyUsd": 40,
+  "attractiveProjectBudgetUsd": 5000,
+  "hoursPerMonth": 160,
+  "employmentMinimumMonthlyUsd": 4600,
+  "employmentTargetMonthlyUsd": 6400,
+  "relocationThresholdMonthlyUsd": 6000,
+  "excludedTerms": ["bombas para minería", "mining pumps"],
+  "excludedIndustries": [],
+  "relevance": {
+    "dailyTarget": 10,
+    "roleTerms": [
+      "software engineer", "software developer", "backend engineer", "backend developer",
+      "frontend engineer", "frontend developer", "full stack engineer", "full stack developer",
+      "fullstack engineer", "fullstack developer", "platform engineer", "infrastructure engineer",
+      "devops engineer", "site reliability engineer", "sre", "cloud engineer",
+      "software architect", "solutions architect", "engineering manager", "tech lead",
+      "technical lead", "staff engineer", "principal engineer", "developer", "engineer",
+      "programmer", "node js developer", "typescript developer", "react developer",
+      "api engineer", "systems engineer", "automation engineer", "ai engineer",
+      "machine learning engineer", "data engineer", "consultant", "contractor"
+    ],
+    "roleExcludedTerms": [
+      "account executive", "sales", "salesperson", "seller", "business development",
+      "payroll", "legal counsel", "attorney", "paralegal", "recruiter", "recruiting",
+      "talent acquisition", "administrative", "executive assistant", "office manager",
+      "marketing", "brand", "social media", "copywriter", "content writer",
+      "customer success", "customer support", "accountant", "accounting", "bookkeeper",
+      "finance manager", "controller", "nurse", "teacher", "driver", "warehouse",
+      "recepcionista", "vendedor", "contador", "abogado", "enfermera"
+    ],
+    "skillAliases": {
+      "node.js": ["node", "nodejs", "node js"],
+      "next.js": ["next", "nextjs", "next js"],
+      "typescript": ["ts"],
+      "javascript": ["js", "ecmascript"],
+      "postgresql": ["postgres", "psql"],
+      "kubernetes": ["k8s"],
+      "ci/cd": ["ci cd", "continuous integration", "continuous delivery", "continuous deployment"],
+      "rest api": ["rest", "restful", "api"],
+      "aws": ["amazon web services"],
+      "go": ["golang"],
+      "react": ["react js", "reactjs"],
+      "graphql": ["apollo"],
+      "testing": ["unit testing", "test automation", "tdd"]
+    },
+    "relocationTargets": [
+      "united states", "usa", "us", "canada", "united kingdom", "uk", "ireland",
+      "germany", "netherlands", "spain", "portugal", "france", "italy", "belgium",
+      "switzerland", "austria", "sweden", "norway", "denmark", "finland",
+      "poland", "czech republic", "estonia", "luxembourg", "europe",
+      "new york", "san francisco", "seattle", "austin", "boston", "chicago",
+      "los angeles", "denver", "atlanta", "miami", "toronto", "vancouver",
+      "london", "berlin", "munich", "amsterdam", "dublin", "madrid", "barcelona",
+      "lisbon", "paris", "zurich", "stockholm", "copenhagen", "oslo", "helsinki",
+      "warsaw", "prague", "tallinn", "vienna", "brussels", "milan"
+    ]
+  }
 }

@@ -103,7 +103,8 @@ test('CLI opt-in genera solo briefs elegibles y no toca drafts', async () => {
     const candidacyDirectory = join(directory, 'candidacy');
     await writeFile(candidatePath, `${JSON.stringify(factsInput)}\n`);
     const eligible = opportunity();
-    const blocked = opportunity({ title: 'Old role', source: 'test', externalId: 'old', publishedAt: '2026-09-12' });
+    // Ocho días: un día fuera de PUBLICATION_WINDOW_DAYS, así el caso sigue probando "stale no genera brief".
+    const blocked = opportunity({ title: 'Old role', source: 'test', externalId: 'old', publishedAt: '2026-09-08' });
     const args = ['src/cli.ts', '--input', '-', '--state', statePath, '--now', now.toISOString(), '--candidate', candidatePath, '--candidacy-dir', candidacyDirectory];
     const first = spawnSync(process.execPath, args, { input: JSON.stringify([eligible, blocked]), encoding: 'utf8' });
     assert.equal(first.status, 0, first.stderr);

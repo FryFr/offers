@@ -8,10 +8,12 @@ export interface Source {
 }
 const adapters: Adapter[] = ['remotive', 'rss', 'greenhouse', 'lever', 'ashby'];
 const fields = ['id', 'adapter', 'enabled', 'endpoint', 'company', 'board', 'region', 'secretEnv', 'captureHtml', 'minIntervalMinutes', 'fetchContent'];
+/** El techo protege el tiempo de ciclo y el tamaño del checkpoint, no la corrección. */
+export const MAX_SOURCES = 400;
 export function parseRegistry(value: unknown): Source[] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('registry_invalid');
   const registry = value as Record<string, unknown>;
-  if (registry.version !== 1 || !Array.isArray(registry.sources) || registry.sources.length > 100 || Object.keys(registry).some(k => !['version', 'sources'].includes(k))) throw new Error('registry_invalid');
+  if (registry.version !== 1 || !Array.isArray(registry.sources) || registry.sources.length > MAX_SOURCES || Object.keys(registry).some(k => !['version', 'sources'].includes(k))) throw new Error('registry_invalid');
   const ids = new Set<string>();
   return registry.sources.map(raw => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('source_invalid');

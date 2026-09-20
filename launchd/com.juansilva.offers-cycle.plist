@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ciclo horario de ingesta de ofertas (`npm run sources -- --dry-run`).
+     Plantilla versionada: el original vive en ~/Library/LaunchAgents, que no se respalda
+     ni se versiona. Instalar con `make install-agents` o copiando el archivo.
+
+     StartInterval sobre cron a propósito: si el Mac está dormido a la hora agendada, cron
+     PIERDE la corrida; launchd la ejecuta al despertar y agrupa las perdidas en un disparo.
+     Conectado a la corriente el Mac no duerme (pmset sleep 0), así que el ciclo corre;
+     con batería duerme al minuto y no corre. Esa es la limitación conocida de correr local.
+
+     RunAtLoad queda en false: cargar el agente no debe disparar red inmediatamente.
+     La primera corrida se fuerza a mano con
+       launchctl kickstart -k gui/$(id -u)/com.juansilva.offers-cycle
+
+     Los secretos (NOTION_API_KEY) NO van aquí: este archivo está en git. Van en el plist
+     instalado o en un archivo con chmod 600 fuera del repositorio. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.juansilva.offers-cycle</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/juansilva/.local/bin/node</string>
+    <string>/Users/juansilva/Documents/offers/src/source-cli.ts</string>
+    <string>--dry-run</string>
+  </array>
+  <key>WorkingDirectory</key>   <string>/Users/juansilva/Documents/offers</string>
+  <key>StartInterval</key>      <integer>3600</integer>
+  <key>RunAtLoad</key>          <false/>
+  <key>StandardOutPath</key>    <string>/Users/juansilva/Documents/offers/data/logs/cycle.out.log</string>
+  <key>StandardErrorPath</key>  <string>/Users/juansilva/Documents/offers/data/logs/cycle.err.log</string>
+  <!-- El ciclo es I/O-bound y no debe competir con lo que estés haciendo en el Mac. -->
+  <key>ProcessType</key>        <string>Background</string>
+  <key>LowPriorityIO</key>      <true/>
+  <key>Nice</key>               <integer>5</integer>
+</dict>
+</plist>

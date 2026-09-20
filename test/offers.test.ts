@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
-import { normalize, classify, expiration, evaluate } from '../src/evaluate.ts';
-import { identity, ingest, parseStore, report, type Store } from '../src/pipeline.ts';
+import { normalize, classify, expiration, evaluate, verification, PUBLICATION_WINDOW_DAYS } from '../src/evaluate.ts';
+import { identity, ingest, parseStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
 
 const profile = parseProfile({ skills: ['TypeScript'], remoteOnly: true });
 const now = new Date('2026-09-16T12:00:00Z');
@@ -176,12 +176,15 @@ test('empleo: información ausente, otras divisas y proyecciones no inventan ele
   assert.equal(evaluate(opportunity({ kind: 'unknown' }), profile, now).screening.employment.status, 'unknown');
 });
 
-test('recomendaciones: máximo 20, balance, orden explicable y desempate determinista', () => {
+test('recomendaciones: tope configurable, balance, orden explicable y desempate determinista', () => {
   const offers = Array.from({ length: 40 }, (_, i) => verifiedOpportunity({ title: `Job ${i}`, kind: i < 30 ? 'employment' : 'freelance', relocationRequired: false, compensation: { currency: 'USD', period: 'month', min: i < 30 ? 7000 : 2000 } }));
   const state = ingest(empty(), offers);
   const result = report(state, profile, now);
-  assert.equal(result.recommendations.length, 20);
-  assert.equal(result.recommendations.filter(r => r.kind === 'freelance').length, 5);
+  // El tope lo fija el perfil, no una constante: un corte diario es una preferencia, no una regla.
+  assert.equal(result.recommendations.length, profile.relevance.dailyTarget);
+  assert.equal(result.recommendations.filter(r => r.kind === 'freelance').length, 5, 'la reserva por tipo protege freelance del volumen de empleo');
+  const wider = report(state, parseProfile({ skills: ['TypeScript'], remoteOnly: true, relevance: { dailyTarget: 25 } }), now);
+  assert.equal(wider.recommendations.length, 25);
   assert.deepEqual(report({ ...state, records: [...state.records].reverse() }, profile, now).recommendations, result.recommendations);
   result.recommendations.forEach((r, i) => {
     assert.equal(r.rank, i + 1);
@@ -190,7 +193,7 @@ test('recomendaciones: máximo 20, balance, orden explicable y desempate determi
     assert.equal(result.notion.records.find(n => n.externalKey === r.id)?.properties['Recommendation rank'].number, r.rank);
   });
   assert.deepEqual(result.notion.recommendations, result.recommendations);
-  assert.equal(report(ingest(empty(), offers.slice(0, 30)), profile, now).recommendations.length, 20);
+  assert.equal(report(ingest(empty(), offers.slice(0, 30)), profile, now).recommendations.length, profile.relevance.dailyTarget);
   assert.equal(report(empty(), profile, now).recommendations.length, 0);
 });
 
@@ -213,31 +216,52 @@ test('reevalúa reglas configuradas y selección diaria sin alterar el estado fu
   assert.equal(JSON.stringify(state), before);
 });
 
-test('verificación: hoy y 1–3 días inclusivos; >3 stale y prioridad de hoy sobre scores', () => {
-  for (const [day, expected] of [[16, 'verified'], [15, 'verified'], [14, 'verified'], [13, 'verified'], [12, 'stale']] as const) {
-    const o = verifiedOpportunity({ publishedAt: `2026-09-${day}` });
+test('verificación: ventana de 7 días inclusiva; >7 stale y prioridad de hoy sobre scores', () => {
+  assert.equal(PUBLICATION_WINDOW_DAYS, 7);
+  for (const [day, expected] of [[16, 'verified'], [13, 'verified'], [10, 'verified'], [9, 'verified'], [8, 'stale']] as const) {
+    const o = verifiedOpportunity({ publishedAt: `2026-09-${String(day).padStart(2, '0')}` });
     const v = evaluate(o, profile, now).verification;
     assert.equal(v.status, expected);
     assert.equal(v.ageDays, 16 - day);
     assert.equal(v.sameDay, day === 16);
+    assert.equal(v.windowDays, PUBLICATION_WINDOW_DAYS);
     assert.equal(report(ingest(empty(), o), profile, now).recommendations.length, expected === 'verified' ? 1 : 0);
   }
+  // La ventana es un parámetro, no una constante incrustada en la lógica.
+  const eightDays = verifiedOpportunity({ publishedAt: '2026-09-08' });
+  assert.equal(verification(eightDays, now, 8).status, 'verified');
+  assert.equal(verification(eightDays, now, 3).reasons.includes('publication_older_than_window_3d'), true);
+  for (const invalid of [-1, 1.5, Number.NaN]) assert.throws(() => verification(eightDays, now, invalid));
+  // validUntil se corta al primer límite: TTL de 24h, fin de la ventana, o deadline.
+  const ttlBound = verifiedOpportunity({ publishedAt: '2026-09-16', availability: { ...evidence.availability, checkedAt: '2026-09-16T00:00:00Z' } });
+  assert.equal(verification(ttlBound, now).validUntil, '2026-09-17T00:00:00.000Z');
+  const windowBound = verifiedOpportunity({ publishedAt: '2026-09-09' });
+  assert.equal(verification(windowBound, now, 3).validUntil, '2026-09-13T00:00:00.000Z');
+  // La recencia inclina, no decide: una oferta de ayer claramente mejor gana a una de hoy floja.
+  // Con la ventana de 7 días, lo contrario hundiría coincidencias perfectas bajo ruido fresco.
   const today = verifiedOpportunity({ title: 'Today', skills: [] });
   const older = verifiedOpportunity({ title: 'Yesterday', publishedAt: '2026-09-15', compensation: { currency: 'USD', period: 'hour', min: 100 } });
   const result = report(ingest(empty(), [older, today]), profile, now);
-  assert.equal(result.recommendations[0]?.id, identity(today));
-  assert.ok(result.recommendations[0]!.priority < result.recommendations[1]!.priority);
-  const boundary = verifiedOpportunity({ publishedAt: '2026-09-13', availability: { ...evidence.availability, checkedAt: '2026-09-16T23:00:00Z' } });
+  assert.equal(result.recommendations[0]?.id, identity(older));
+  assert.ok(result.recommendations[0]!.priority > result.recommendations[1]!.priority);
+  // El bono de recencia existe, está acotado y decae con la antigüedad.
+  const bonus = (r: typeof result.recommendations[number]) => r.reasons.find(x => x.reason.startsWith('Recencia'))!.points;
+  assert.equal(bonus(result.recommendations.find(r => r.id === identity(today))!), 12);
+  assert.equal(bonus(result.recommendations.find(r => r.id === identity(older))!), 10);
+  const boundary = verifiedOpportunity({ publishedAt: '2026-09-09', availability: { ...evidence.availability, checkedAt: '2026-09-16T23:00:00Z' } });
   assert.equal(evaluate(boundary, profile, new Date('2026-09-16T23:59:59.999Z')).verification.status, 'verified');
   assert.equal(evaluate(boundary, profile, new Date('2026-09-17T00:00:00Z')).verification.status, 'stale');
 });
 
-test('prioridad de hoy también controla la selección antes de reservar plazas por tipo', () => {
-  const today = Array.from({ length: 20 }, (_, i) => verifiedOpportunity({ title: `Today ${i}`, kind: 'unknown' }));
-  const old = Array.from({ length: 10 }, (_, i) => verifiedOpportunity({ title: `Old ${i}`, publishedAt: '2026-09-15', kind: 'employment' }));
-  const result = report(ingest(empty(), [...old, ...today]), profile, now);
-  assert.equal(result.recommendations.length, 20);
-  assert.ok(result.recommendations.every(r => r.sameDay));
+test('la reserva por tipo sobrevive al volumen y el tipo desconocido compite en las plazas restantes', () => {
+  const unknownKind = Array.from({ length: 20 }, (_, i) => verifiedOpportunity({ title: `Unknown ${i}`, kind: 'unknown' }));
+  const freelance = Array.from({ length: 2 }, (_, i) => verifiedOpportunity({ title: `Freelance ${i}`, kind: 'freelance' }));
+  const result = report(ingest(empty(), [...unknownKind, ...freelance]), profile, now);
+  assert.equal(result.recommendations.length, profile.relevance.dailyTarget);
+  // Dos freelance entre veintidós candidatas: sin reserva se perderían bajo el volumen.
+  assert.equal(result.recommendations.filter(r => r.kind === 'freelance').length, 2);
+  assert.ok(result.recommendations.some(r => r.kind === 'unknown'), 'el tipo desconocido compite, no se excluye');
+  assert.ok(result.recommendations.every(r => r.tier !== 'off_target'));
 });
 
 test('verificación: ausencias, fechas futuras, evidencia ajena y vencimiento bloquean recomendaciones', () => {
@@ -303,4 +327,39 @@ test('migración conserva ejemplos históricos unknown; reingesta guarda evidenc
   const result = report(state, profile, now);
   assert.ok(result.records[0]?.historicalEvaluations[1]?.evaluation.verification.reasons.includes('listing_closed'));
   assert.deepEqual(result.records[0]?.historicalEvaluations[0]?.opportunity.availability, evidence.availability);
+});
+
+test('una re-comprobación que solo mueve timestamps actualiza la oferta sin generar revisión', () => {
+  const original = verifiedOpportunity();
+  // Mismo outcome, mismo httpStatus, misma evidencia: solo avanzaron los sellos de re-comprobación.
+  const rechecked = { ...original, availability: { ...evidence.availability, checkedAt: '2026-09-16T18:00:00Z' },
+    publicationEvidence: { ...evidence.publicationEvidence, observedAt: '2026-09-16T18:00:00Z' } };
+  const state = ingest(ingest(empty(), original), rechecked);
+  assert.equal(state.records[0]?.opportunity.availability?.checkedAt, '2026-09-16T18:00:00Z', 'el TTL necesita el sello fresco');
+  assert.equal(state.records[0]?.history, undefined, 'una re-comprobación no es una revisión');
+  // Un cambio real sí se registra, y arrastra la versión vigente aunque venga de una re-comprobación.
+  const closed = { ...rechecked, availability: { ...rechecked.availability, outcome: 'closed' as const } };
+  const changed = ingest(state, closed);
+  assert.deepEqual(changed.records[0]?.history, [rechecked]);
+  assert.deepEqual(parseStore(changed), changed);
+});
+
+test(`el historial por registro se acota a ${MAX_HISTORY} revisiones y conserva las más recientes`, () => {
+  const revisions = Array.from({ length: 8 }, (_, i) => verifiedOpportunity({ location: `Rev ${i}` }));
+  const state = revisions.reduce(ingest, empty());
+  const record = state.records[0]!;
+  assert.equal(state.records.length, 1, 'todas las revisiones comparten identidad');
+  assert.equal(record.opportunity.location, 'Rev 7');
+  assert.equal(record.history?.length, MAX_HISTORY);
+  // Se descartan las más antiguas (Rev 0 y Rev 1), nunca las recientes.
+  assert.deepEqual(record.history?.map(o => o.location), ['Rev 2', 'Rev 3', 'Rev 4', 'Rev 5', 'Rev 6']);
+  assert.deepEqual(parseStore(state), state);
+});
+
+test('la razón de ventana lleva el número y la cadena de 3 días ya no existe', () => {
+  const stale = verifiedOpportunity({ publishedAt: '2026-09-01' });
+  const reasons = verification(stale, now).reasons;
+  assert.ok(reasons.includes(`publication_older_than_window_${PUBLICATION_WINDOW_DAYS}d`));
+  const everything = JSON.stringify(report(ingest(empty(), stale), profile, now));
+  assert.equal(everything.includes('publication_older_than_3_days'), false);
 });

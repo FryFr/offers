@@ -1,12 +1,17 @@
 import type { report } from './pipeline.ts';
 import { identity } from './pipeline.ts';
 import { parseAvailability, parseOpportunity, type AvailabilityEvidence, type Opportunity } from './contracts.ts';
-import { verification, type Verification } from './evaluate.ts';
+import { verification, PUBLICATION_WINDOW_DAYS, type Verification } from './evaluate.ts';
 
 type Projection = ReturnType<typeof report>['notion']['records'][number];
 export type NotionRecord = Pick<Projection, 'externalKey' | 'properties'> & { opportunity?: Opportunity };
 const calculationContextFields = ['Origin', 'Calculation assumptions', 'Explanation'] as const;
-const fields = ['Name', 'Company', 'URL', 'Type', 'Expiration', 'Deadline', 'Verification', 'Verification reasons', 'Published', 'Screening', 'Screening reasons', 'Employment eligibility', 'Location', 'Relocation', 'Recommendation rank', 'Recommendation priority', 'Fit score', 'Economic score', 'Hourly USD', 'Freelance review', ...calculationContextFields] as const;
+/**
+ * Nombres de propiedad que este módulo sabe enviar. Añadir uno aquí SIN crearlo en la base de
+ * Notion hace que cada upsert devuelva 400 y `failed` iguale al total: la verificación de esquema
+ * de `--sync` es la que debe impedirlo, no la suerte.
+ */
+const fields = ['Name', 'Company', 'URL', 'Type', 'Expiration', 'Deadline', 'Verification', 'Verification reasons', 'Published', 'Screening', 'Screening reasons', 'Employment eligibility', 'Location', 'Relocation', 'Recommendation rank', 'Recommendation priority', 'Relevance', 'Relevance tier', 'Fit score', 'Economic score', 'Hourly USD', 'Freelance review', ...calculationContextFields] as const;
 export interface NotionConfig {
   enabled: boolean;
   dataSourceId?: string;
@@ -55,7 +60,7 @@ function properties(record: NotionRecord, config: NotionConfig): Record<string, 
   return result;
 }
 function gate(record: NotionRecord, now: Date): Verification {
-  if (!record.opportunity) return { status: 'unknown', reasons: ['verification_context_missing'], ageDays: null, sameDay: false, validUntil: null };
+  if (!record.opportunity) return { status: 'unknown', reasons: ['verification_context_missing'], ageDays: null, sameDay: false, validUntil: null, windowDays: PUBLICATION_WINDOW_DAYS };
   const opportunity = parseOpportunity(record.opportunity);
   if (identity(opportunity) !== record.externalKey) throw new Error('invalid_record');
   const result = verification(opportunity, now);

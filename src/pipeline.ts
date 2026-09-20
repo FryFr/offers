@@ -5,6 +5,8 @@ import { evaluate } from './evaluate.ts';
 
 export interface RecordEntry { id: string; opportunity: Opportunity; history?: Opportunity[] }
 export interface Store { version: 1; records: RecordEntry[] }
+/** Revisiones anteriores conservadas por registro. Lecturas antiguas no se reconstruyen desde el store. */
+export const MAX_HISTORY = 5;
 const canonicalText = (s: string) => s.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
 const notionRichText = (values: readonly string[]) => values.flatMap(value => {
   const chunks: { text: { content: string } }[] = [];
@@ -41,6 +43,17 @@ export function parseStore(value: unknown): Store {
   });
   return { version: 1, records };
 }
+/**
+ * La oferta sin sus sellos de re-comprobación. `availability.checkedAt` y
+ * `publicationEvidence.observedAt` avanzan en CADA ciclo aunque nada de la vacante cambie:
+ * medido, 3.460 de 3.462 registros diferían solo en esos dos campos tras una corrida horaria.
+ * Tratarlos como revisión duplicaba el store cada hora para no registrar ninguna información.
+ */
+const withoutRecheckStamps = (o: Opportunity) => JSON.stringify({
+  ...o,
+  ...(o.availability ? { availability: { ...o.availability, checkedAt: '' } } : {}),
+  ...(o.publicationEvidence ? { publicationEvidence: { ...o.publicationEvidence, observedAt: '' } } : {}),
+});
 export function ingest(store: Store, input: unknown): Store {
   const opportunities = (Array.isArray(input) ? input : [input]).map(parseOpportunity);
   const records = new Map(store.records.map(r => [r.id, r]));
@@ -48,14 +61,20 @@ export function ingest(store: Store, input: unknown): Store {
     const id = identity(opportunity);
     const previous = records.get(id);
     if (previous && JSON.stringify(previous.opportunity) === JSON.stringify(opportunity)) continue;
-    records.set(id, { id, opportunity, ...(previous ? { history: [...(previous.history ?? []), previous.opportunity] } : {}) });
+    // Una re-comprobación que solo mueve timestamps actualiza la oferta pero no genera revisión:
+    // el TTL necesita el `checkedAt` fresco, el historial no gana nada guardando el anterior.
+    const recheckOnly = previous !== undefined && withoutRecheckStamps(previous.opportunity) === withoutRecheckStamps(opportunity);
+    const history = previous && !recheckOnly ? [...(previous.history ?? []), previous.opportunity] : previous?.history ?? [];
+    // El historial se acota por registro: sin tope, un cambio real de contrato reescribe miles de
+    // registros a la vez y el store crece sin techo. Se conservan las revisiones más recientes.
+    records.set(id, { id, opportunity, ...(history.length ? { history: history.slice(-MAX_HISTORY) } : {}) });
   }
   return { version: 1, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
 }
 export function report(store: Store, profile: Profile, now: Date) {
   const records = store.records.map(r => ({ ...r, evaluation: evaluate(r.opportunity, profile, now),
     historicalEvaluations: (r.history ?? []).map(opportunity => ({ opportunity, evaluation: evaluate(opportunity, profile, now) })) }));
-  const recommendations = recommend(records);
+  const recommendations = recommend(records, { dailyTarget: profile.relevance.dailyTarget });
   const ranks = new Map(recommendations.map(r => [r.id, r]));
   return {
     schemaVersion: 1,
@@ -85,6 +104,10 @@ export function report(store: Store, profile: Profile, now: Date) {
           Relocation: { select: { name: r.opportunity.relocationRequired === undefined ? 'unknown' : r.opportunity.relocationRequired ? 'required' : 'not_required' } },
           'Recommendation rank': { number: ranks.get(r.id)?.rank ?? null },
           'Recommendation priority': { number: ranks.get(r.id)?.priority ?? null },
+          // Se envía para TODO lo verificado, no solo lo recomendado: un ranker que se equivoca
+          // debe poder inspeccionarse con un filtro de vista, no quedar invisible.
+          Relevance: { number: r.evaluation.relevance.score },
+          'Relevance tier': { select: { name: r.evaluation.relevance.tier } },
           'Fit score': { number: r.evaluation.scores.fit.value },
           'Economic score': { number: r.evaluation.scores.economic.value },
           'Hourly USD': { number: r.evaluation.normalized.hourlyUsd?.min ?? null },

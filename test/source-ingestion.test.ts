@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseRegistry, sourceHeaders, type Source } from '../src/source-registry.ts';
+import { parseRegistry, sourceHeaders, MAX_SOURCES, type Source } from '../src/source-registry.ts';
 import { adaptSource, canonicalUrl } from '../src/source-adapters.ts';
 import { parseRss } from '../src/rss.ts';
 import { collectSource, deduplicate, runSourceCycle } from '../src/multi-source.ts';
@@ -27,6 +27,13 @@ test('registry rejects embedded secrets, duplicate IDs, unknown options, unsafe 
   assert.throws(() => source('greenhouse', { board: '../other' }));
   assert.throws(() => sourceHeaders(source('rss', { secretEnv: 'OFFERS_SOURCE_FEED_TOKEN' }), {}));
   assert.deepEqual(sourceHeaders(source('rss', { secretEnv: 'OFFERS_SOURCE_FEED_TOKEN' }), { OFFERS_SOURCE_FEED_TOKEN: 'test-only' }), { Authorization: 'Bearer test-only' });
+});
+
+test(`el registro admite hasta ${MAX_SOURCES} fuentes y rechaza una más`, () => {
+  const bulk = (count: number) => ({ version: 1, sources: Array.from({ length: count },
+    (_, i) => ({ id: `board-${i}`, adapter: 'greenhouse', board: `acme${i}`, company: 'Acme', enabled: false })) });
+  assert.equal(parseRegistry(bulk(MAX_SOURCES)).length, MAX_SOURCES);
+  assert.throws(() => parseRegistry(bulk(MAX_SOURCES + 1)), /registry_invalid/);
 });
 for (const adapter of ['remotive', 'greenhouse', 'lever', 'ashby', 'rss'] as const) test(`${adapter}: fixture normalization and provenance preserve explicit evidence only`, async () => {
   const result = adaptSource(source(adapter), await fixture(adapter === 'rss' ? 'jobs.rss' : `${adapter}.json`), now);
@@ -175,12 +182,48 @@ test('checkpoint atomically persists local plan and cadence, retains provenance,
     assert.equal(await readFile(join(root, 'data/offers.json'), 'utf8'), legacy);
     const disk = JSON.parse(await readFile(join(root, 'data/source-cycle.json'), 'utf8'));
     assert.equal(Object.keys(disk.provenance).length, 1); assert.equal(disk.confirmed, false);
+    // `jobs` no se persiste: nadie lo relee y duplicaba el checkpoint. Lo que sí se recupera, sigue ahí.
+    assert.equal(Object.hasOwn(disk, 'jobs'), false);
+    assert.ok(first.jobs.length > 0, 'el ciclo sí devuelve jobs en memoria');
+    for (const key of ['version', 'mode', 'confirmed', 'state', 'store', 'provenance']) assert.ok(Object.hasOwn(disk, key), key);
     assert.equal((await sourceHealth(root, now)).healthy, true);
     assert.equal((await sourceHealth(root, new Date('2026-09-21'))).healthy, false);
     assert.equal(await sourcesMain(['--sync'], root), 5);
     await writeFile(join(root, 'data/source-cycle.json'), '{malformed');
     await assert.rejects(runSources({ root, now }));
     assert.equal(await readFile(join(root, 'data/source-cycle.json'), 'utf8'), '{malformed');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test('un checkpoint ausente no es una degradación: --health sale 0 hasta el primer ciclo', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'offers-health-'));
+  try {
+    await mkdir(join(root, 'data'));
+    const missing = await sourceHealth(root, now);
+    assert.equal(missing.healthy, false);
+    assert.equal(missing.reason, 'no_checkpoint');
+    assert.equal(await sourcesMain(['--health'], root), 0, 'una instalación limpia no debe alertar');
+    // Un checkpoint presente pero vencido sí es una degradación real y sí alerta.
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false,
+      generatedAt: new Date(now.getTime() - 25 * 60 * 60_000).toISOString(), health: [{ sourceId: 'ashby', status: 'ok' }] }));
+    assert.equal((await sourceHealth(root, now)).reason, 'checkpoint_degraded');
+    assert.equal(await sourcesMain(['--health'], root), 4);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test('--dry-run distingue "sin Notion configurado" de "esquema sin verificar"', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'offers-clean-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), '{}');
+    // Fuentes deshabilitadas: el ciclo no toca la red y aun así produce un plan.
+    await writeFile(join(root, 'examples/sources.json'), JSON.stringify({ version: 1, sources: [{ id: 'ashby', adapter: 'ashby', enabled: false, board: 'acme', company: 'Acme' }] }));
+    await writeFile(join(root, 'data/offers.json'), JSON.stringify(ingest({ version: 1, records: [] },
+      { title: 'Developer', company: 'Acme', url: 'https://example.com/job', skills: [] })));
+    assert.equal(await sourcesMain(['--dry-run'], root), 0, 'sin notion-local.json el ciclo completo es un éxito');
+    const disk = JSON.parse(await readFile(join(root, 'data/source-cycle.json'), 'utf8'));
+    assert.equal(disk.notionPlan.blocked[0]?.reason, 'schema_unverified');
+    // El mismo bloqueo, pero con un destino Notion declarado y sin verificar, sí debe avisar.
+    await writeFile(join(root, 'data/notion-local.json'), JSON.stringify({ schemaVerified: false, config }));
+    assert.equal(await sourcesMain(['--dry-run'], root), 5);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test('--dry-run never trips the write guard when notion-local.json has an enabled config, and makes no Notion calls', async () => {

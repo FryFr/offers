@@ -123,12 +123,16 @@ Compensaciones finitas y no negativas; máximo >= mínimo. El perfil acepta habi
 
 ## Política de publicación y disponibilidad
 
-Solo se aceptan como recomendaciones o sincronizaciones activas oportunidades **verified** publicadas hoy o hace 1–3 días calendario UTC, con el día 3 incluido. Al comenzar el día 4 quedan `stale`. Hoy tiene prioridad sobre cualquier score y sobre la reserva por tipo. No se interpreta este límite como 72 horas móviles: la entrada publica una fecha, sin hora.
+Solo se aceptan como recomendaciones o sincronizaciones activas oportunidades **verified** publicadas dentro de la ventana de `PUBLICATION_WINDOW_DAYS` días calendario UTC (hoy: **7**, con el día 7 incluido). Al comenzar el día siguiente quedan `stale`. Hoy tiene prioridad sobre cualquier score y sobre la reserva por tipo. No se interpreta este límite como horas móviles: la entrada publica una fecha, sin hora.
+
+La ventana es un parámetro, no una constante incrustada: `verification(o, now, windowDays)` acepta un valor distinto y la razón de bloqueo lo refleja (`publication_older_than_window_7d`). `verification.windowDays` acompaña cada evaluación para que el motivo sea auditable sin conocer la configuración.
+
+**La ventana y el TTL de disponibilidad son ortogonales y no deben confundirse.** La ventana mide qué tan vieja es la *publicación*; el TTL de 24 horas mide qué tan vieja es la *prueba de que la vacante sigue abierta*. Ampliar la ventana no afloja la exigencia de evidencia: una oferta de hace seis días solo entra si su disponibilidad se comprobó en las últimas 24 horas. Como el ciclo relee cada fuente periódicamente, esa comprobación se refresca sola; una oferta que desaparece del feed deja de refrescarse y cae por TTL.
 
 | Estado | Significado |
 | --- | --- |
-| `verified` | Publicación comprobable dentro del límite, ficha abierta con evidencia y comprobación vigente |
-| `stale` | Publicación hace más de 3 días |
+| `verified` | Publicación comprobable dentro de la ventana, ficha abierta con evidencia y comprobación vigente |
+| `stale` | Publicación anterior a la ventana |
 | `unavailable` | HTTP 404/410, fuente desaparecida, ficha cerrada o deadline vencido |
 | `unknown` | Fecha/evidencia ausente, futura o inconsistente, respuesta ambigua, timeout/error o verificación vencida |
 
@@ -159,7 +163,7 @@ Contrato ilustrativo para una evidencia **sintética** (no prueba una oferta rea
 
 Las URLs de ambas evidencias deben coincidir con `opportunity.url`. El responsable de la captura/adaptador debe comprobar que el extracto prueba `publishedAt` y que la ficha corresponde a esa oportunidad. No hay inferencia automática desde HTML ni scraping incorporado. `outcome` admite `open`, `closed`, `missing`, `ambiguous`, `timeout`, `error`; únicamente `open` con HTTP 200 y evidencia no vacía confirma disponibilidad. Los timestamps son ISO UTC; fechas futuras o una comprobación anterior a la publicación bloquean.
 
-La vigencia máxima de disponibilidad es **24 horas**, con vencimiento inclusivo: exactamente 24 horas ya bloquea. `validUntil` señala el primer límite entre esa vigencia, el inicio del día 4 y el deadline. Antes de cualquier llamada a Notion, el adaptador vuelve a calcular el estado con el reloj actual. Si existe `revalidate`, la ejecuta para cada candidata y exige otra vez `verified`; si no existe, solo admite evidencia registrada aún vigente. Evidencia ya vencida bloquea y debe actualizarse en la entrada antes de intentar sincronizar. También comprueba la vigencia tras consultar Notion y antes de escribir, por si venció durante la consulta.
+La vigencia máxima de disponibilidad es **24 horas**, con vencimiento inclusivo: exactamente 24 horas ya bloquea. `validUntil` señala el primer límite entre esa vigencia, el fin de la ventana de publicación y el deadline. Antes de cualquier llamada a Notion, el adaptador vuelve a calcular el estado con el reloj actual. Si existe `revalidate`, la ejecuta para cada candidata y exige otra vez `verified`; si no existe, solo admite evidencia registrada aún vigente. Evidencia ya vencida bloquea y debe actualizarse en la entrada antes de intentar sincronizar. También comprueba la vigencia tras consultar Notion y antes de escribir, por si venció durante la consulta.
 
 La API `upsertNotionRecords(records, config, transport, options?)` admite `options.revalidate`, `options.now` (reloj inyectado para pruebas) y `options.timeoutMs` (5000 por defecto; máximo 60000). El verificador recibe una copia de la oportunidad y un `AbortSignal`. Timeout, excepción o respuesta inválida bloquean sin usar Notion; los mensajes de excepción no se reflejan. No hay verificador de red ni credenciales incorporados. El módulo suministrado por un integrador es el responsable de consultar y entender la fuente, si decide habilitarlo.
 
@@ -201,7 +205,7 @@ Solo las verificadas y no excluidas por screening generan payloads activos. Las 
 
 SHA-256 de la primera identidad disponible: `(source, externalId)`; de lo contrario URL sin fragmento, tracking `utm_*`, `fbclid`, `gclid`, con query ordenada; finalmente `(company, title)` normalizados. No modifica mayúsculas del ID externo ni parámetros funcionales de la URL.
 
-La ingesta hace upsert: el último objeto de una identidad reemplaza completamente el actual, no es un patch. Las versiones anteriores se conservan en `history`, con su evidencia de publicación y disponibilidad. Repetir la entrada actual no agrega registros ni historial; con `--now` fijo también es idéntico el reporte. El estado almacena datos fuente, no scores desactualizados; todo se reevalúa con el perfil y fecha actuales. No se borra lo que falta en un lote nuevo.
+La ingesta hace upsert: el último objeto de una identidad reemplaza completamente el actual, no es un patch. Las versiones anteriores se conservan en `history`, con su evidencia de publicación y disponibilidad, **acotadas a las `MAX_HISTORY` (5) revisiones más recientes por registro**: sin ese tope, un cambio de contrato reescribe miles de registros a la vez y el store crece sin techo. Las revisiones descartadas son las más antiguas; el store no reconstruye lecturas anteriores a ese corte. Repetir la entrada actual no agrega registros ni historial; con `--now` fijo también es idéntico el reporte. El estado almacena datos fuente, no scores desactualizados; todo se reevalúa con el perfil y fecha actuales. No se borra lo que falta en un lote nuevo.
 
 Límite deliberado: no hay deduplicación difusa ni unión entre fuentes. Agregar un ID o URL a una entrada previamente identificada por título puede crear otra identidad. Dos vacantes con igual empresa/título necesitan URL o ID distintos. El fallback puede fusionarlas si no se proporcionan. Para actualizar títulos con estabilidad, usar fuente/ID desde el inicio.
 
@@ -258,7 +262,7 @@ Sin salario USD mensual o tarifa USD con `hoursPerMonth` declarado, el salario q
 
 `recommend(records)` recibe registros evaluados. Cada ejecución del reporte produce `recommendations` para la fecha `generatedAt` (UTC, inyectable con `--now`); no hay scheduler ni servicio externo. Exige `verification.status === "verified"` y excluye descartadas, vencidas y empleos inelegibles. La incertidumbre salarial o de clasificación puede mantenerse para investigar únicamente si publicación y disponibilidad están verificadas; también conserva revisiones freelance bajo el piso. `unknown` de verificación nunca se recomienda.
 
-La prioridad suma fit + score económico + 30 si cumple elegibilidad de empleo o piso freelance + 20 si alcanza el objetivo de empleo. Cada aporte está explicado. Primero se seleccionan las publicadas hoy; después las de hace 1–3 días, hasta 20 en total. Dentro de cada grupo se reservan hasta cinco plazas por tipo conocido y se completan por prioridad económica/fit. El balance no desplaza oportunidades de hoy para introducir otras antiguas. Tipo desconocido compite en plazas restantes. La lista final ordena hoy primero, luego prioridad descendente e ID estable para desempatar, independientemente del orden de entrada.
+La prioridad suma fit + score económico + 30 si cumple elegibilidad de empleo o piso freelance + 20 si alcanza el objetivo de empleo. Cada aporte está explicado. Primero se seleccionan las publicadas hoy; después el resto de la ventana, hasta 20 en total. Dentro de cada grupo se reservan hasta cinco plazas por tipo conocido y se completan por prioridad económica/fit. El balance no desplaza oportunidades de hoy para introducir otras antiguas. Tipo desconocido compite en plazas restantes. La lista final ordena hoy primero, luego prioridad descendente e ID estable para desempatar, independientemente del orden de entrada.
 
 Cada recomendación incluye ID, tipo, `sameDay`, rango (`rank`), prioridad, contribuciones y razón de selección. `notion.recommendations` replica la selección y cada fila de `notion.records` incluye descarte, motivos, elegibilidad, ubicación, relocalización y rango/prioridad (null cuando no fue seleccionada). Las evaluaciones completas siguen en `explanation`. Todo es una proyección local, sin APIs.
 

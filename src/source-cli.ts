@@ -55,17 +55,39 @@ export async function runSources(options: { root?: string; enrichModel?: string;
       }
       provenance[key] = [...groups.values()].flatMap(entries => entries.length > 1 ? [entries[0]!, entries.at(-1)!] : entries);
     }
-    await atomicMailWrite(join(data, 'source-cycle.json'), { ...result, provenance });
-    return result;
+    // `jobs` es la captura cruda del ciclo y nadie la vuelve a leer: runSources solo recupera
+    // store, state y provenance del checkpoint previo. Persistirla duplicaba el archivo sin uso.
+    const { jobs: _discarded, ...persisted } = result;
+    await atomicMailWrite(join(data, 'source-cycle.json'), { ...persisted, provenance });
+    // Estado del proceso, no del checkpoint. Distingue tres casos que antes se colapsaban en
+    // exit 5: sin archivo (no hay Notion que verificar), con archivo sin verificar (sí alerta),
+    // y con archivo verificado (el planificador decide).
+    return { ...result, notionLocalPresent: local !== undefined };
   }));
 }
+/**
+ * Pico de heap del ciclo, en MB. Aproximado: el muestreo no corre durante bloques síncronos
+ * como `report()`, así que subestima. Sirve para detectar crecimiento anómalo al escalar
+ * fuentes comparando contra la línea base, no como medida exacta.
+ */
+function trackHeapPeak(intervalMs = 250) {
+  let peak = process.memoryUsage().heapUsed;
+  const sample = () => { peak = Math.max(peak, process.memoryUsage().heapUsed); };
+  const timer = setInterval(sample, intervalMs);
+  timer.unref();
+  return () => { clearInterval(timer); sample(); return Math.round(peak / 1_048_576); };
+}
+export type HealthReason = 'no_checkpoint' | 'checkpoint_degraded';
 export async function sourceHealth(root = repositoryRoot, now = new Date()) {
-  const checkpoint = await json(join(root, 'data/source-cycle.json')) as { generatedAt?: string; health?: { status?: string }[]; mode?: string; confirmed?: boolean; notionPlan?: { records?: unknown[] }; counts?: unknown };
+  const checkpoint = await optionalJson(join(root, 'data/source-cycle.json')) as { generatedAt?: string; health?: { status?: string }[]; mode?: string; confirmed?: boolean; notionPlan?: { records?: unknown[] }; counts?: unknown } | undefined;
+  // Un checkpoint ausente no es una degradación: es un ciclo que todavía no ha corrido. Confundirlos
+  // convertía cada instalación limpia en una alerta y entrenaba a ignorar el monitor.
+  if (checkpoint === undefined) return { healthy: false, reason: 'no_checkpoint' as HealthReason, mode: 'dry-run', confirmed: false, generatedAt: undefined, counts: undefined };
   const age = now.getTime() - Date.parse(checkpoint.generatedAt ?? '');
   const healthy = Number.isFinite(age) && age >= 0 && age < 24 * 60 * 60_000 && checkpoint.mode === 'dry-run' && checkpoint.confirmed === false
     && Array.isArray(checkpoint.health) && checkpoint.health.some(s => ['ok', 'not_due'].includes(s.status ?? ''))
     && checkpoint.health.every(s => ['ok', 'not_due', 'disabled'].includes(s.status ?? ''));
-  return { healthy, mode: 'dry-run', confirmed: false, generatedAt: checkpoint.generatedAt, counts: checkpoint.counts };
+  return { healthy, ...(healthy ? {} : { reason: 'checkpoint_degraded' as HealthReason }), mode: 'dry-run', confirmed: false, generatedAt: checkpoint.generatedAt, counts: checkpoint.counts };
 }
 /** Reads the existing checkpoint store/profile and the existing writer only; never recollects sources or revalidates cadence. */
 export async function runNotionSync(options: { root?: string; now?: Date; dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
@@ -99,8 +121,13 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
     return 0;
   }
   if (args.length === 1 && args[0] === '--health') {
-    try { const health = await sourceHealth(root); console.log(JSON.stringify(health)); return health.healthy ? 0 : 4; }
-    catch { console.error('source_health_unavailable'); return 4; }
+    try {
+      const health = await sourceHealth(root);
+      console.log(JSON.stringify(health));
+      // Sin checkpoint todavía no hay nada que juzgar: sale 0 para no disparar alertas
+      // en cada instalación limpia hasta que el primer --dry-run complete.
+      return health.healthy || health.reason === 'no_checkpoint' ? 0 : 4;
+    } catch { console.error('source_health_unavailable'); return 4; }
   }
   if (args.length === 1 && args[0] === '--sync') {
     try {
@@ -117,10 +144,14 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
   }
   if (args[0] !== '--dry-run' || ![1, 3].includes(args.length) || (args.length === 3 && (args[1] !== '--enrich-model' || !args[2]))) return 2;
   try {
+    const stopHeapTracking = trackHeapPeak();
     const result = await runSources({ root, enrichModel: args[2] });
-    console.log(JSON.stringify({ mode: result.mode, confirmed: false, counts: result.counts, health: result.health }));
+    console.log(JSON.stringify({ mode: result.mode, confirmed: false, counts: result.counts, heapPeakMb: stopHeapTracking(), health: result.health }));
     if (result.health.some(s => s.status === 'failed')) return 4;
     if (result.health.some(s => s.status === 'partial')) return 6;
+    // Sin data/notion-local.json no hay esquema que verificar y el ciclo fue un éxito completo.
+    // El 5 queda para el caso real: el operador declaró un destino Notion y no lo verificó.
+    if (!result.notionLocalPresent) return 0;
     return result.notionPlan.blocked.some(b => 'reason' in b && b.reason === 'schema_unverified') ? 5 : 0;
   } catch (error) {
     const busy = error instanceof Error && error.message.includes('existe .lock');

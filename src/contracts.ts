@@ -37,8 +37,25 @@ export interface Opportunity {
   recurring?: boolean;
   growthPotential?: boolean;
 }
+/**
+ * Configuración de la señal POSITIVA de relevancia. Vive aparte de `excludedTerms`
+ * porque responde otra pregunta: screening decide qué descartar, relevance decide qué encaja.
+ */
+export interface RelevanceConfig {
+  /** Familias de términos del rol objetivo, cotejadas contra título y descripción. */
+  roleTerms: string[];
+  /** Familias de rol que descartan de plano (ventas, nómina, legal…), no términos sueltos. */
+  roleExcludedTerms: string[];
+  /** Variantes por habilidad: `node.js` no coincide con `nodejs` ni con `node` sin esto. */
+  skillAliases: Record<string, string[]>;
+  /** Ubicaciones donde un puesto presencial sigue siendo interesante por la vía de reubicación. */
+  relocationTargets: string[];
+  /** Cuántas oportunidades entrega un corte diario. */
+  dailyTarget: number;
+}
 export interface Profile {
   skills: string[];
+  relevance: RelevanceConfig;
   preferredKinds: Exclude<Kind, 'unknown'>[];
   remoteOnly: boolean;
   targetHourlyUsd: number;
@@ -51,8 +68,11 @@ export interface Profile {
   excludedTerms: string[];
   excludedIndustries: string[];
 }
+export const defaultRelevance: RelevanceConfig = {
+  roleTerms: [], roleExcludedTerms: [], skillAliases: {}, relocationTargets: [], dailyTarget: 10,
+};
 export const defaultProfile: Profile = {
-  skills: [], preferredKinds: ['employment', 'freelance'], remoteOnly: false,
+  skills: [], relevance: defaultRelevance, preferredKinds: ['employment', 'freelance'], remoteOnly: false,
   targetHourlyUsd: 25, freelanceFloorHourlyUsd: 25,
   attractiveProjectBudgetUsd: 2000, hoursPerMonth: 160,
   employmentMinimumMonthlyUsd: 3000, employmentTargetMonthlyUsd: 4500,
@@ -155,5 +175,25 @@ export function parseProfile(value: unknown): Profile {
   for (const key of ['targetHourlyUsd', 'freelanceFloorHourlyUsd', 'attractiveProjectBudgetUsd', 'hoursPerMonth', 'employmentMinimumMonthlyUsd', 'employmentTargetMonthlyUsd', 'relocationThresholdMonthlyUsd'] as const) if (v[key] !== undefined) p[key] = positive(v[key], key);
   for (const key of ['excludedTerms', 'excludedIndustries'] as const) p[key] = strings(v[key] ?? defaultProfile[key], key);
   if (p.employmentTargetMonthlyUsd < p.employmentMinimumMonthlyUsd) throw new Error('employmentTargetMonthlyUsd debe ser >= employmentMinimumMonthlyUsd');
+  p.relevance = parseRelevance(v.relevance);
   return p;
+}
+function parseRelevance(value: unknown): RelevanceConfig {
+  if (value === undefined) return { ...defaultRelevance, skillAliases: {} };
+  const v = object(value, 'relevance');
+  // Cerrado a propósito: una clave mal escrita aquí apagaría en silencio una señal de relevancia.
+  const known = ['roleTerms', 'roleExcludedTerms', 'skillAliases', 'relocationTargets', 'dailyTarget'];
+  if (Object.keys(v).some(k => !known.includes(k))) throw new Error('relevance: clave desconocida');
+  const config: RelevanceConfig = { ...defaultRelevance, skillAliases: {} };
+  for (const key of ['roleTerms', 'roleExcludedTerms', 'relocationTargets'] as const) config[key] = strings(v[key] ?? defaultRelevance[key], `relevance.${key}`);
+  if (v.dailyTarget !== undefined) {
+    config.dailyTarget = positive(v.dailyTarget, 'relevance.dailyTarget');
+    if (!Number.isSafeInteger(config.dailyTarget)) throw new Error('relevance.dailyTarget: entero requerido');
+  }
+  if (v.skillAliases !== undefined) {
+    for (const [skill, aliases] of Object.entries(object(v.skillAliases, 'relevance.skillAliases'))) {
+      config.skillAliases[str(skill, 'relevance.skillAliases').toLowerCase()] = strings(aliases, `relevance.skillAliases.${skill}`);
+    }
+  }
+  return config;
 }
