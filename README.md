@@ -215,6 +215,23 @@ SHA-256 de la primera identidad disponible: `(source, externalId)`; de lo contra
 - `Compensation.period` admite `hour|day|week|month|year|project`. La normalización vive en **un solo lugar** (`src/compensation.ts`): antes estaba duplicada con dos matemáticas divergentes entre `screening` y `evaluate`.
 - `src/fx.ts` convierte monedas con una tabla **estática, versionada y fechada**. No es cotización y cada cifra derivada lo dice. Una prueba falla cuando la tabla supera los 180 días, para que la refresque una persona. Una moneda fuera de la tabla no se estima: se deja sin evaluar.
 
+### Corte diario y entrega
+
+```sh
+npm run sources -- --dry-run          # recolecta y persiste el checkpoint (horario)
+npm run sources -- --digest           # entrega el corte del día (lectura; no toca la red)
+npm run sources -- --refresh-sponsors # registro británico de patrocinadores (semanal)
+npm run sources -- --health
+```
+
+`--digest` escribe `data/digest/YYYY-MM-DD.md` con exactamente `relevance.dailyTarget` oportunidades. Cada una explica por qué está ahí: rol coincidente, habilidades encontradas en el texto, pago (o que la fuente no lo publica), modalidad, patrocinio con su cita, y antigüedad. **Si no hay nada que supere el umbral, el digest lo dice** en vez de rellenar con lo que no encaja: entregar ruido entrena a hojear el informe en vez de leerlo.
+
+Solo entran los tiers `strong` y `possible`. Todo lo verificado sigue yendo a Notion con su `Relevance` y `Relevance tier`, así que un error del ranker se inspecciona con un filtro de vista.
+
+`data/delivered.json` es el **ledger de entrega**. Sin él, una ventana de siete días entrega la misma lista siete días seguidos: el corte es determinista y sin memoria repite su mejor respuesta. Lo ya entregado se **degrada**, no se elimina — si un día solo hay 6 nuevas, completar con repetidas marcadas es mejor que entregar seis y dejar creer que no había más.
+
+`data/metrics.jsonl` acumula una línea por corte (`deliveredNew`, `relevanceStrong`, `freelanceCount`, `sponsorshipCount`…). **Ese archivo es el instrumento de la decisión "arrancar con fuentes gratuitas y medir":** si la mediana de `deliveredNew` se queda corta durante dos semanas, hay evidencia para pagar cobertura; si no, no hace falta.
+
 ### Patrocinio de visado
 
 `sponsorship` distingue dos cosas que no deben confundirse: `stated` es **la oferta afirmando por escrito** que patrocina, y `employer_registered` es solo que el empleador figura en el registro oficial británico de patrocinadores con licencia. Lo segundo es un dato administrativo, no una promesa sobre ese puesto, y pesa mucho menos en el ranking.

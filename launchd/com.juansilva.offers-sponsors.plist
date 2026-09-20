@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Refresco semanal del registro británico de patrocinadores con licencia
+     (`npm run sources -- --refresh-sponsors`), lunes 05:00 hora local.
+
+     Descarga ~11 MB del CSV oficial de gov.uk y guarda solo los nombres normalizados con ruta
+     Skilled Worker (~120.000). Cadencia semanal porque el registro cambia unas pocas veces por
+     semana: pedirlo cada hora sería descortés y no aportaría nada.
+
+     El enlace del CSV lleva un hash que cambia en cada edición, así que se extrae de la página
+     en lugar de fijarlo; por eso el comando hace dos peticiones, no una. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.juansilva.offers-sponsors</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/juansilva/.local/bin/node</string>
+    <string>/Users/juansilva/Documents/offers/src/source-cli.ts</string>
+    <string>--refresh-sponsors</string>
+  </array>
+  <key>WorkingDirectory</key>   <string>/Users/juansilva/Documents/offers</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>          <integer>1</integer>
+    <key>Hour</key>             <integer>5</integer>
+    <key>Minute</key>           <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>          <false/>
+  <key>StandardOutPath</key>    <string>/Users/juansilva/Documents/offers/data/logs/sponsors.out.log</string>
+  <key>StandardErrorPath</key>  <string>/Users/juansilva/Documents/offers/data/logs/sponsors.err.log</string>
+  <key>ProcessType</key>        <string>Background</string>
+  <key>LowPriorityIO</key>      <true/>
+  <key>Nice</key>               <integer>10</integer>
+</dict>
+</plist>

@@ -19,8 +19,9 @@ const DAILY_TIERS: readonly string[] = ['strong', 'possible'];
  * días, ordenar todo lo de hoy primero hunde una coincidencia perfecta de ayer bajo una
  * mediocre de hoy. Se conserva en la salida como dato, no como prioridad.
  */
-export function recommend(records: EvaluatedRecord[], options: { dailyTarget?: number } = {}) {
+export function recommend(records: EvaluatedRecord[], options: { dailyTarget?: number; delivered?: ReadonlySet<string> } = {}) {
   const limit = options.dailyTarget ?? 20;
+  const delivered = options.delivered ?? new Set<string>();
   const candidates = records.filter(r => r.evaluation.verification?.status === 'verified' && r.evaluation.screening.status !== 'discarded'
     && r.evaluation.expiration !== 'expired' && r.evaluation.screening.employment.status !== 'ineligible'
     // Solo `strong` y `possible` entran al corte. `weak` significa "no encaja, pero no está
@@ -41,8 +42,11 @@ export function recommend(records: EvaluatedRecord[], options: { dailyTarget?: n
       { points: e.relevance.sponsorshipBonus, reason: e.relevance.sponsorshipBonus ? `Patrocinio de visado declarado (${r.opportunity.sponsorship?.scope ?? 'sin alcance'})` : 'Sin señal de patrocinio' },
     ];
     return { id: r.id, kind: e.classification.kind, tier: e.relevance.tier, sameDay: e.verification.sameDay,
+      repeated: delivered.has(r.id),
       sponsors: r.opportunity.sponsorship?.status === 'stated', priority: reasons.reduce((sum, x) => sum + x.points, 0), reasons };
-  }).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id));
+  // Lo ya entregado se DEGRADA, no se elimina: si solo hay 6 nuevas, completar con repetidas
+  // marcadas es mejor que entregar seis y dejar creer que no había más.
+  }).sort((a, b) => Number(a.repeated) - Number(b.repeated) || b.priority - a.priority || a.id.localeCompare(b.id));
 
   // Reservas: por tipo, para que freelance no desaparezca bajo el volumen de empleo; y por
   // patrocinio, porque migrar es objetivo propio y un bono no garantiza nada — con suficientes
@@ -57,6 +61,6 @@ export function recommend(records: EvaluatedRecord[], options: { dailyTarget?: n
     selected.add(c.id);
   }
   return candidates.filter(c => selected.has(c.id)).map((c, index) => ({ ...c, rank: index + 1,
-    selectionReason: !reserved.has(c.id) ? 'Seleccionada por prioridad en plazas restantes'
-      : c.sponsors ? 'Reserva de patrocinio de visado' : `Entre los primeros ${RESERVED_PER_KIND} de su tipo; reserva de balance` }));
+    selectionReason: `${c.repeated ? 'Repetida (ya entregada antes); ' : ''}${!reserved.has(c.id) ? 'seleccionada por prioridad en plazas restantes'
+      : c.sponsors ? 'reserva de patrocinio de visado' : `entre los primeros ${RESERVED_PER_KIND} de su tipo; reserva de balance`}` }));
 }

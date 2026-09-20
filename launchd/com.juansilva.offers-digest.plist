@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Corte diario de ofertas (`npm run sources -- --digest`), 06:00 hora local.
+     Plantilla versionada: el original vive en ~/Library/LaunchAgents, que no se versiona.
+
+     Es una LECTURA del checkpoint: no toca la red ni recolecta fuentes. Entrega las
+     oportunidades que no se hayan entregado antes, escribe data/digest/YYYY-MM-DD.md y
+     añade una línea a data/metrics.jsonl.
+
+     StartCalendarInterval sobre cron a propósito: si el Mac está dormido a las 06:00, cron
+     PIERDE la corrida; launchd la ejecuta al despertar. Un digest tardío sirve; uno que nunca
+     llega, no.
+
+     Los secretos NO van aquí: este archivo está en git. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.juansilva.offers-digest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/juansilva/.local/bin/node</string>
+    <string>/Users/juansilva/Documents/offers/src/source-cli.ts</string>
+    <string>--digest</string>
+  </array>
+  <key>WorkingDirectory</key>   <string>/Users/juansilva/Documents/offers</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>             <integer>6</integer>
+    <key>Minute</key>           <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>          <false/>
+  <key>StandardOutPath</key>    <string>/Users/juansilva/Documents/offers/data/logs/digest.out.log</string>
+  <key>StandardErrorPath</key>  <string>/Users/juansilva/Documents/offers/data/logs/digest.err.log</string>
+  <key>ProcessType</key>        <string>Background</string>
+  <key>LowPriorityIO</key>      <true/>
+  <key>Nice</key>               <integer>5</integer>
+</dict>
+</plist>

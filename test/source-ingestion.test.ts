@@ -253,6 +253,30 @@ test('checkpoint atomically persists local plan and cadence, retains provenance,
     assert.equal(await readFile(join(root, 'data/source-cycle.json'), 'utf8'), '{malformed');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+test('la salud se decide por quórum, no por unanimidad', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'offers-quorum-'));
+  try {
+    await mkdir(join(root, 'data'));
+    const checkpoint = (statuses: string[]) => JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false, generatedAt: now.toISOString(),
+      health: statuses.map((status, i) => ({ sourceId: `s${i}`, status, fetched: 0, rejected: 0, checkedAt: now.toISOString() })) });
+    const write = (statuses: string[]) => writeFile(join(root, 'data/source-cycle.json'), checkpoint(statuses));
+    const many = (n: number, status: string) => Array.from({ length: n }, () => status);
+    // Una rota de veinte no puede dejar sin ofertas a nadie por un 429 ajeno.
+    await write([...many(19, 'ok'), 'failed']);
+    assert.equal((await sourceHealth(root, now)).healthy, true);
+    assert.deepEqual((await sourceHealth(root, now)).quorum?.degraded, ['s19'], 'la rota se reporta con nombre aunque no bloquee');
+    // Pero una mayoría rota sí significa que el resultado no es fiable.
+    await write([...many(16, 'ok'), ...many(4, 'failed')]);
+    assert.equal((await sourceHealth(root, now)).healthy, true, '80% exacto todavía alcanza el quórum');
+    await write([...many(15, 'ok'), ...many(5, 'failed')]);
+    assert.equal((await sourceHealth(root, now)).healthy, false, '75% ya no es fiable');
+    // Las deshabilitadas no cuentan como rotas ni como sanas: salen del denominador.
+    await write([...many(4, 'ok'), ...many(16, 'disabled')]);
+    assert.equal((await sourceHealth(root, now)).healthy, true);
+    await write(many(3, 'disabled'));
+    assert.equal((await sourceHealth(root, now)).healthy, false, 'un ciclo sin ninguna fuente activa no sirve para sincronizar');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 test('un checkpoint ausente no es una degradación: --health sale 0 hasta el primer ciclo', async () => {
   const root = await mkdtemp(join(tmpdir(), 'offers-health-'));
   try {

@@ -53,17 +53,20 @@ export async function loadMailCursor(path: string, scope: string): Promise<MailC
 }
 
 /** Same-directory replace, fsync both file and directory; injectable rename for failure tests. */
-export async function atomicMailWrite(path: string, value: unknown, replace: typeof rename = rename): Promise<void> {
+/** Temporal + fsync + rename atómico. El contenido ya viene serializado. */
+export async function atomicWriteText(path: string, contents: string, replace: typeof rename = rename): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, 'wx', 0o600);
-    try { await file.writeFile(`${JSON.stringify(value, null, 2)}\n`); await file.sync(); } finally { await file.close(); }
+    try { await file.writeFile(contents); await file.sync(); } finally { await file.close(); }
     await replace(temporary, path);
     const directory = await open(dirname(path), 'r');
     try { await directory.sync(); } finally { await directory.close(); }
   } finally { await rm(temporary, { force: true }); }
 }
+export const atomicMailWrite = (path: string, value: unknown, replace: typeof rename = rename): Promise<void> =>
+  atomicWriteText(path, `${JSON.stringify(value, null, 2)}\n`, replace);
 const saveCursor = (path: string, cursor: MailCursor) => atomicMailWrite(path, { ...cursor, checksum: hash(cursor) });
 
 /** Exclusive lock is never stolen automatically; a crash requires operator recovery. */

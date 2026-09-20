@@ -10,18 +10,22 @@ macOS vive en `~/Library/LaunchAgents`, que no se versiona ni se respalda.
 | Plist | Comando | Cadencia | Fase |
 | --- | --- | --- | --- |
 | `com.juansilva.offers-cycle` | `--dry-run` | cada hora | disponible |
-| `com.juansilva.offers-digest` | `--digest` | diaria 06:00 | pendiente (F7) |
-| `com.juansilva.offers-sponsors` | `--refresh-sponsors` | semanal | pendiente (F4) |
+| `com.juansilva.offers-digest` | `--digest` | diaria 06:00 | disponible |
+| `com.juansilva.offers-sponsors` | `--refresh-sponsors` | lunes 05:00 | disponible |
 
 Solo se versionan agentes cuyo comando ya existe: agendar un subcomando que aún no está
 implementado produce un agente que falla en silencio cada hora.
+
+El ciclo recolecta; el digest **solo lee** el checkpoint y entrega. Separarlos significa que un
+proveedor caído no te deja sin corte diario, y que el corte se puede repetir sin volver a pedir
+nada a nadie.
 
 ## Instalar
 
 ```sh
 mkdir -p data/logs ~/Library/LaunchAgents
-cp launchd/com.juansilva.offers-cycle.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.juansilva.offers-cycle.plist
+cp launchd/*.plist ~/Library/LaunchAgents/
+for a in offers-cycle offers-digest offers-sponsors; do launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.juansilva.$a.plist; done
 ```
 
 `RunAtLoad` es `false`: cargar el agente no dispara red. La primera corrida se fuerza a mano.

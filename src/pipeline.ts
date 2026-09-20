@@ -71,10 +71,10 @@ export function ingest(store: Store, input: unknown): Store {
   }
   return { version: 1, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
 }
-export function report(store: Store, profile: Profile, now: Date) {
+export function report(store: Store, profile: Profile, now: Date, options: { delivered?: ReadonlySet<string> } = {}) {
   const records = store.records.map(r => ({ ...r, evaluation: evaluate(r.opportunity, profile, now),
     historicalEvaluations: (r.history ?? []).map(opportunity => ({ opportunity, evaluation: evaluate(opportunity, profile, now) })) }));
-  const recommendations = recommend(records, { dailyTarget: profile.relevance.dailyTarget });
+  const recommendations = recommend(records, { dailyTarget: profile.relevance.dailyTarget, ...(options.delivered ? { delivered: options.delivered } : {}) });
   const ranks = new Map(recommendations.map(r => [r.id, r]));
   return {
     schemaVersion: 1,

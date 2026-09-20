@@ -1,9 +1,11 @@
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, appendFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { parseProfile } from './contracts.ts';
+import { parseLedger, deliveredIds, recordDelivery } from './delivery-ledger.ts';
+import { renderDigest } from './digest.ts';
 import { parseStore, report } from './pipeline.ts';
-import { atomicMailWrite, withMailLock } from './mail-runner.ts';
+import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts';
 import { parseRegistry } from './source-registry.ts';
 import { runSourceCycle, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
@@ -94,17 +96,71 @@ export async function refreshSponsors(options: { root?: string; now?: Date; depe
   await atomicMailWrite(join(data, 'uk-sponsors.json'), register);
   return { organisations: register.organisations.length, sourceUrl: register.sourceUrl, fetchedAt: register.fetchedAt };
 }
+/**
+ * Corte diario: lee el checkpoint existente, entrega `dailyTarget` oportunidades que no se hayan
+ * entregado antes y anota la entrega. No recolecta fuentes ni toca la red — es una lectura.
+ *
+ * Cada corrida escribe también una línea en `data/metrics.jsonl`. Ese archivo es el instrumento
+ * de la decisión "arrancar con fuentes gratuitas y medir": si la mediana de `deliveredNew` se
+ * queda por debajo del objetivo durante dos semanas, hay evidencia para pagar cobertura; si no,
+ * no hace falta.
+ */
+export async function runDigest(options: { root?: string; now?: Date } = {}) {
+  const root = options.root ?? repositoryRoot, data = join(root, 'data');
+  await mkdir(join(data, 'digest'), { recursive: true, mode: 0o700 });
+  return withMailLock(join(data, 'automation'), async () => {
+    const now = options.now ?? new Date();
+    const checkpoint = await json(join(data, 'source-cycle.json')) as { store?: unknown; counts?: Record<string, number>; generatedAt?: string };
+    const profile = parseProfile(await json(join(root, 'examples/profile.json')));
+    const ledger = parseLedger(await optionalJson(join(data, 'delivered.json')));
+    const store = parseStore(checkpoint.store);
+    const snapshot = report(store, profile, now, { delivered: deliveredIds(ledger) });
+    const date = now.toISOString().slice(0, 10);
+    const markdown = renderDigest(snapshot, { date, profile });
+    await atomicWriteText(join(data, 'digest', `${date}.md`), markdown);
+    const nuevas = snapshot.recommendations.filter(r => !r.repeated);
+    await atomicMailWrite(join(data, 'delivered.json'), recordDelivery(ledger, snapshot.recommendations.map(r => r.id), now.toISOString()));
+    const verified = snapshot.records.filter(r => r.evaluation.verification.status === 'verified');
+    const metric = {
+      date, generatedAt: now.toISOString(),
+      captured: checkpoint.counts?.captured ?? null,
+      verified: verified.length,
+      relevanceStrong: verified.filter(r => r.evaluation.relevance.tier === 'strong').length,
+      relevancePossible: verified.filter(r => r.evaluation.relevance.tier === 'possible').length,
+      delivered: snapshot.recommendations.length,
+      deliveredNew: nuevas.length,
+      freelanceCount: snapshot.recommendations.filter(r => r.kind === 'freelance').length,
+      sponsorshipCount: snapshot.recommendations.filter(r => r.sponsors).length,
+      storeRecords: store.records.length,
+    };
+    await appendFile(join(data, 'metrics.jsonl'), `${JSON.stringify(metric)}\n`, { mode: 0o600 });
+    return metric;
+  });
+}
 export type HealthReason = 'no_checkpoint' | 'checkpoint_degraded';
+/** Proporción de fuentes habilitadas que deben estar sanas para considerar utilizable el ciclo. */
+export const HEALTH_QUORUM = 0.8;
 export async function sourceHealth(root = repositoryRoot, now = new Date()) {
-  const checkpoint = await optionalJson(join(root, 'data/source-cycle.json')) as { generatedAt?: string; health?: { status?: string }[]; mode?: string; confirmed?: boolean; notionPlan?: { records?: unknown[] }; counts?: unknown } | undefined;
+  const checkpoint = await optionalJson(join(root, 'data/source-cycle.json')) as { generatedAt?: string; health?: { status?: string; sourceId?: string }[]; mode?: string; confirmed?: boolean; notionPlan?: { records?: unknown[] }; counts?: unknown } | undefined;
   // Un checkpoint ausente no es una degradación: es un ciclo que todavía no ha corrido. Confundirlos
   // convertía cada instalación limpia en una alerta y entrenaba a ignorar el monitor.
-  if (checkpoint === undefined) return { healthy: false, reason: 'no_checkpoint' as HealthReason, mode: 'dry-run', confirmed: false, generatedAt: undefined, counts: undefined };
+  if (checkpoint === undefined) return { healthy: false, reason: 'no_checkpoint' as HealthReason, mode: 'dry-run', confirmed: false, generatedAt: undefined, counts: undefined, quorum: undefined };
   const age = now.getTime() - Date.parse(checkpoint.generatedAt ?? '');
-  const healthy = Number.isFinite(age) && age >= 0 && age < 24 * 60 * 60_000 && checkpoint.mode === 'dry-run' && checkpoint.confirmed === false
-    && Array.isArray(checkpoint.health) && checkpoint.health.some(s => ['ok', 'not_due'].includes(s.status ?? ''))
-    && checkpoint.health.every(s => ['ok', 'not_due', 'disabled'].includes(s.status ?? ''));
-  return { healthy, ...(healthy ? {} : { reason: 'checkpoint_degraded' as HealthReason }), mode: 'dry-run', confirmed: false, generatedAt: checkpoint.generatedAt, counts: checkpoint.counts };
+  const fresh = Number.isFinite(age) && age >= 0 && age < 24 * 60 * 60_000 && checkpoint.mode === 'dry-run' && checkpoint.confirmed === false && Array.isArray(checkpoint.health);
+  /**
+   * Quórum en vez de unanimidad. Exigir que TODAS las fuentes estén sanas funcionaba con 15;
+   * con 20 o 100 significa que cualquier proveedor con un mal día bloquea el sync entero y deja
+   * a la persona sin ofertas por un 429 ajeno. Una mayoría sana es señal suficiente de que el
+   * ciclo sirve; las rotas se reportan igual, nombre por nombre.
+   */
+  const entries = fresh ? checkpoint.health! : [];
+  const enabled = entries.filter(s => s.status !== 'disabled');
+  const working = enabled.filter(s => ['ok', 'not_due'].includes(s.status ?? ''));
+  const ratio = enabled.length ? working.length / enabled.length : 0;
+  const healthy = fresh && enabled.length > 0 && ratio >= HEALTH_QUORUM;
+  const quorum = { working: working.length, enabled: enabled.length, required: HEALTH_QUORUM,
+    degraded: enabled.filter(s => !['ok', 'not_due'].includes(s.status ?? '')).map(s => s.sourceId ?? '?') };
+  return { healthy, ...(healthy ? {} : { reason: 'checkpoint_degraded' as HealthReason }), mode: 'dry-run', confirmed: false, generatedAt: checkpoint.generatedAt, counts: checkpoint.counts, quorum };
 }
 /** Reads the existing checkpoint store/profile and the existing writer only; never recollects sources or revalidates cadence. */
 export async function runNotionSync(options: { root?: string; now?: Date; dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
@@ -146,6 +202,14 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       return health.healthy || health.reason === 'no_checkpoint' ? 0 : 4;
     } catch { console.error('source_health_unavailable'); return 4; }
   }
+  if (args.length === 1 && args[0] === '--digest') {
+    try { console.log(JSON.stringify(await runDigest({ root }))); return 0; }
+    catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
+      console.error(message === 'ledger_invalid' ? 'ledger_invalid' : 'digest_failed'); return 4;
+    }
+  }
   if (args.length === 1 && args[0] === '--refresh-sponsors') {
     try { console.log(JSON.stringify(await refreshSponsors({ root }))); return 0; }
     catch (error) { console.error(error instanceof Error && ['register_page_unavailable', 'register_link_not_found', 'register_download_failed', 'register_header_unexpected', 'register_empty'].includes(error.message) ? error.message : 'sponsors_refresh_failed'); return 4; }
@@ -168,8 +232,14 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
     const stopHeapTracking = trackHeapPeak();
     const result = await runSources({ root, enrichModel: args[2] });
     console.log(JSON.stringify({ mode: result.mode, confirmed: false, counts: result.counts, heapPeakMb: stopHeapTracking(), health: result.health }));
-    if (result.health.some(s => s.status === 'failed')) return 4;
-    if (result.health.some(s => s.status === 'partial')) return 6;
+    // El quórum manda también aquí: una fuente rota de veinte no convierte un ciclo útil en un
+    // fallo. El 4 queda para cuando la mayoría no respondió y el resultado no es fiable.
+    const enabledSources = result.health.filter(s => s.status !== 'disabled');
+    const workingSources = enabledSources.filter(s => ['ok', 'not_due'].includes(s.status));
+    // Un registro con todo deshabilitado no es un fallo del ciclo sino una configuración: el ciclo
+    // hizo lo que se le pidió. Es `--health` quien debe marcar que ese checkpoint no sirve.
+    if (enabledSources.length && workingSources.length / enabledSources.length < HEALTH_QUORUM) return 4;
+    if (result.health.some(s => s.status === 'partial' || s.status === 'failed')) return 6;
     // Sin data/notion-local.json no hay esquema que verificar y el ciclo fue un éxito completo.
     // El 5 queda para el caso real: el operador declaró un destino Notion y no lo verificó.
     if (!result.notionLocalPresent) return 0;
