@@ -1,5 +1,5 @@
 import { captureEvidence, createNodeCaptureFetch, type CaptureFetch } from './evidence-capture.ts';
-import { type Profile } from './contracts.ts';
+import { type Opportunity, type Profile } from './contracts.ts';
 import { identity, ingest, report, type Store } from './pipeline.ts';
 import { planNotionSync, validateNotionConfig } from './notion-sync.ts';
 import { adaptSource, canonicalUrl, type CapturedJob } from './source-adapters.ts';
@@ -116,10 +116,25 @@ export async function runSourceCycle(options: CycleOptions) {
   }
   const previous = options.store ?? { version: 1, records: [] };
   // Existing source-ID keyed records retain their keys. Ambiguous legacy URL aliases are quarantined.
+  //
+  // Indexed once instead of re-canonicalising every stored record per job, and tolerant of records
+  // whose URL canonicalUrl() rejects: a record that cannot be canonicalised simply cannot alias an
+  // incoming job, so it is skipped rather than allowed to abort the cycle. Measured 2026-09-19: with
+  // 46 LinkedIn alert records in data/offers.json the whole run died with `source_disallowed` thrown
+  // out of this filter, because safe-http disallows linkedin.com by design — one unreachable host in
+  // the existing store took down every source.
+  const legacyByUrl = new Map<string, Opportunity[]>();
+  for (const r of previous.records) {
+    if (!r.opportunity.url) continue;
+    let key: string;
+    try { key = canonicalUrl(r.opportunity.url); } catch { continue; }
+    const bucket = legacyByUrl.get(key);
+    if (bucket) bucket.push(r.opportunity); else legacyByUrl.set(key, [r.opportunity]);
+  }
   const incoming = jobs.flatMap(job => {
-    const matches = previous.records.filter(r => r.opportunity.url && canonicalUrl(r.opportunity.url) === job.opportunity.url);
+    const matches = legacyByUrl.get(job.opportunity.url!) ?? [];
     if (matches.length > 1) { job.warnings.push('legacy_duplicate_conflict'); return []; }
-    const legacy = matches[0]?.opportunity;
+    const legacy = matches[0];
     return [{ ...job.opportunity, ...(legacy?.externalId ? { source: legacy.source, externalId: legacy.externalId } : {}) }];
   });
   let store = ingest(previous, incoming);

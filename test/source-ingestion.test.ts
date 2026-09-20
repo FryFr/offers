@@ -129,6 +129,20 @@ test('legacy source-key records retain identity; existing duplicate aliases are 
   const blocked = await runSourceCycle({ ...options, store: aliases });
   assert.equal(blocked.store.records.length, 2); assert.equal(blocked.notionPlan.records.length, 0);
 });
+test('a stored record on a disallowed host cannot abort the cycle', async () => {
+  // Measured 2026-09-19: 46 LinkedIn alert records in data/offers.json killed every run with
+  // `source_disallowed`, thrown by canonicalUrl() out of the legacy-alias filter. safe-http
+  // disallows linkedin.com by design, so one unreachable host in the existing store took down
+  // all sources. A record that cannot be canonicalised simply cannot alias an incoming job.
+  const body = await fixture('ashby.json'), job = adaptSource(source('ashby'), body, now).jobs[0]!;
+  const poisoned = ingest({ version: 1, records: [] },
+    { ...job.opportunity, url: 'https://www.linkedin.com/jobs/view/123456789', source: 'linkedin', externalId: 'li-1' });
+  assert.throws(() => canonicalUrl(poisoned.records[0]!.opportunity.url!), /source_disallowed/);
+  const result = await runSourceCycle({ sources: [source('ashby')], profile, now, notionConfig: config,
+    resolveHost: resolver, transport: async () => response(body), store: poisoned });
+  assert.equal(result.health[0]!.status, 'ok');
+  assert.ok(result.counts.captured > 0, 'the allowed source still produces jobs');
+});
 test('source failures remain unhealthy during cooldown and never echo secrets', async () => {
   const options = { sources: [source('ashby')], profile, now, resolveHost: resolver, transport: async () => { throw new Error('SECRET_VALUE'); } };
   const result = await runSourceCycle(options);
