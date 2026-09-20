@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "Example Candidate",
+  "headline": "Backend and automation engineer",
+  "location": "Bogotá, Colombia",
+  "contact": {
+    "email": "candidate@example.com",
+    "links": [
+      "https://example.com/portfolio"
+    ]
+  },
+  "skills": [
+    "TypeScript",
+    "Node.js",
+    "REST APIs"
+  ],
+  "highlights": [
+    "Built and maintained TypeScript services.",
+    "Integrated internal systems through documented REST APIs."
+  ]
+}

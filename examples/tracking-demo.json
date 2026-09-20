@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "events": [
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-app-1",
+      "type": "application",
+      "applicationId": "1b8551c24474e5b5c7c36d5f762509a167a9850a94d4aad4050155efcdb5e4d1",
+      "opportunityId": "demo-job-1",
+      "attemptId": "first",
+      "occurredAt": "2026-09-18T09:00:00Z",
+      "recordedAt": "2026-09-18T09:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-app-2",
+      "type": "application",
+      "applicationId": "038327327ccfcfca2d74ec29fa6a9d53073eaa83b35d0ea46e1f3690599b52dc",
+      "opportunityId": "demo-job-2",
+      "attemptId": "first",
+      "occurredAt": "2026-09-18T09:00:00Z",
+      "recordedAt": "2026-09-18T09:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-app-3",
+      "type": "application",
+      "applicationId": "acb7904d961f2d9b360fff2c5126ff0d1496856f1da30c3d6ad1581a35018ffa",
+      "opportunityId": "demo-job-3",
+      "attemptId": "first",
+      "occurredAt": "2026-09-18T09:00:00Z",
+      "recordedAt": "2026-09-18T09:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-app-4",
+      "type": "application",
+      "applicationId": "04c7631dbb21737cfccd79b55d8f373c71146fdbea03f76b2bf6f732f42e42bd",
+      "opportunityId": "demo-job-4",
+      "attemptId": "first",
+      "occurredAt": "2026-09-18T09:00:00Z",
+      "recordedAt": "2026-09-18T09:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-response-1",
+      "type": "response",
+      "applicationId": "1b8551c24474e5b5c7c36d5f762509a167a9850a94d4aad4050155efcdb5e4d1",
+      "outcome": "positive",
+      "occurredAt": "2026-09-18T10:00:00Z",
+      "recordedAt": "2026-09-18T10:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-response-2",
+      "type": "response",
+      "applicationId": "038327327ccfcfca2d74ec29fa6a9d53073eaa83b35d0ea46e1f3690599b52dc",
+      "outcome": "negative",
+      "occurredAt": "2026-09-18T10:00:00Z",
+      "recordedAt": "2026-09-18T10:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-interview-1",
+      "type": "interview",
+      "applicationId": "1b8551c24474e5b5c7c36d5f762509a167a9850a94d4aad4050155efcdb5e4d1",
+      "status": "completed",
+      "occurredAt": "2026-09-18T11:00:00Z",
+      "recordedAt": "2026-09-18T11:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-offer-1",
+      "type": "offer",
+      "applicationId": "1b8551c24474e5b5c7c36d5f762509a167a9850a94d4aad4050155efcdb5e4d1",
+      "status": "received",
+      "occurredAt": "2026-09-18T12:00:00Z",
+      "recordedAt": "2026-09-18T12:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "eventId": "demo-offer-2",
+      "type": "offer",
+      "applicationId": "1b8551c24474e5b5c7c36d5f762509a167a9850a94d4aad4050155efcdb5e4d1",
+      "status": "accepted",
+      "occurredAt": "2026-09-18T13:00:00Z",
+      "recordedAt": "2026-09-18T13:00:00Z"
+    }
+  ]
+}

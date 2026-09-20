@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
+for (const [name, operation] of [['offers-ingestion', '--dry-run'], ['offers-health', '--health']]) test(`${name}: inactive, credential-free workflow uses fixed commands and executable fail-closed gate`, async () => {
+  const workflow = JSON.parse(await readFile(new URL(`../workflows/n8n/${name}.json`, import.meta.url), 'utf8'));
+  assert.equal(workflow.active, false);
+  assert.equal(workflow.nodes.some((n: { credentials?: unknown }) => n.credentials !== undefined), false);
+  const worker = workflow.nodes.find((n: { id: string }) => n.id === 'worker');
+  assert.equal(worker.parameters.command, `/usr/local/bin/node /opt/offers/src/source-cli.ts ${operation}`);
+  assert.equal(worker.retryOnFail, false);
+  const gate = workflow.nodes.find((n: { id: string }) => n.id === 'gate').parameters.jsCode;
+  const execute = (json: unknown) => runInNewContext(`(function() { ${gate} })()`, { $input: { first: () => ({ json }) } }, { timeout: 1000 });
+  const summary = { mode: 'dry-run', confirmed: false, healthy: true, health: [{ status: 'ok' }] };
+  assert.equal(execute({ code: 0, stdout: JSON.stringify(summary) })[0].json.confirmed, false);
+  for (const code of [2, 3, 4, 5, 6]) assert.throws(() => execute({ code, stdout: JSON.stringify(summary) }));
+  assert.throws(() => execute({ code: 0, stdout: 'bad json' }));
+  assert.throws(() => execute({ code: 0, stdout: JSON.stringify({ ...summary, confirmed: true }) }));
+  assert.throws(() => execute({ code: 0, stdout: JSON.stringify({ ...summary, healthy: false, health: [] }) }));
+});

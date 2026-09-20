@@ -1,0 +1,49 @@
+From: LinkedIn <jobs-noreply@linkedin.com>
+Subject: Tu alerta de empleo
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="sanitized"
+
+--sanitized
+Content-Type: text/plain; charset=utf-8
+
+Tu alerta de empleo para mechatronics engineer en Estados Unidos
+Nuevos empleos coinciden con tus preferencias.
+Gestionar alertas: https://www.linkedin.com/jobs/alerts/
+
+Robotics Engineer Intern - Test & Validation
+Contoro Robotics
+Austin, TX
+Ver anuncio de empleo: https://www.linkedin.com/jobs/view/1001
+
+---------------------------------------------------------
+Robotics Engineer
+CTDI
+West Chester, PA
+
+Esta empresa busca personal activamente
+Ver anuncio de empleo: https://www.linkedin.com/jobs/view/1002
+
+---------------------------------------------------------
+Ver todos los empleos en LinkedIn: https://www.linkedin.com/jobs/search/
+Nuevos empleos de tus otras alertas
+Empleos de<strong>«Python»</strong> en América del Sur
+Senior Fullstack AI Developer (Python + React)
+Devsu
+Perú
+10 mil US$-42 mil US$ / año
+Solicitar con perfil y CV
+Ver anuncio de empleo: https://www.linkedin.com/jobs/view/1003
+
+---------------------------------------------------------
+Ver todos los empleos https://www.linkedin.com/jobs/search/
+--sanitized
+Content-Type: text/html; charset=utf-8
+
+<html><body><table><tr><td data-test-id="job-card">
+<table><tr><td><a href="https://www.linkedin.com/jobs/view/1001"><img alt="Contoro Robotics"></a></td>
+<td><a href="https://www.linkedin.com/jobs/view/1001"><table>
+<tr><td><a href="https://www.linkedin.com/jobs/view/1001" class="font-bold text-md">Robotics Engineer Intern - Test &amp; Validation</a></td></tr>
+<tr><td><p class="text-system-gray-100 text-xs">Contoro Robotics · Austin, TX (Presencial)</p></td></tr>
+</table></a></td></tr></table>
+</td></tr></table></body></html>
+--sanitized--

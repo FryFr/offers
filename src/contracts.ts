@@ -74,7 +74,7 @@ function positive(value: unknown, name: string, zero = false): number {
 }
 function strings(value: unknown, name: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${name}: se esperaba una lista`);
-  return [...new Set(value.map(v => str(v, name).toLowerCase()))];
+  return [...new Set(Array.from(value, v => str(v, name).toLowerCase()))];
 }
 function bool(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new Error(`${name}: booleano requerido`);
@@ -97,7 +97,7 @@ function timestamp(value: unknown, name: string): string {
 }
 export function parseAvailability(value: unknown): AvailabilityEvidence {
   const v = object(value, 'availability');
-  if (!['open', 'closed', 'missing', 'ambiguous', 'timeout', 'error'].includes(String(v.outcome))) throw new Error('availability.outcome inválido');
+  if (typeof v.outcome !== 'string' || !['open', 'closed', 'missing', 'ambiguous', 'timeout', 'error'].includes(v.outcome)) throw new Error('availability.outcome inválido');
   const result: AvailabilityEvidence = { url: httpUrl(v.url, 'availability.url'), checkedAt: timestamp(v.checkedAt, 'checkedAt'), outcome: v.outcome as AvailabilityEvidence['outcome'] };
   if (v.httpStatus !== undefined) {
     if (!Number.isInteger(v.httpStatus) || Number(v.httpStatus) < 100 || Number(v.httpStatus) > 599) throw new Error('httpStatus inválido');
@@ -108,7 +108,7 @@ export function parseAvailability(value: unknown): AvailabilityEvidence {
 }
 export function parseOpportunity(value: unknown): Opportunity {
   const v = object(value, 'opportunity');
-  const o: Opportunity = { title: str(v.title, 'title'), company: str(v.company, 'company'), skills: strings(v.skills ?? [], 'skills') };
+  const o: Opportunity = { title: str(v.title, 'title'), company: str(v.company, 'company'), skills: strings(v.skills === undefined ? [] : v.skills, 'skills') };
   for (const key of ['description', 'source', 'externalId', 'url', 'expiresAt', 'location', 'industry'] as const) {
     if (v[key] !== undefined) o[key] = str(v[key], key);
   }
@@ -128,13 +128,13 @@ export function parseOpportunity(value: unknown): Opportunity {
   }
   if (v.availability !== undefined) o.availability = parseAvailability(v.availability);
   if (v.kind !== undefined) {
-    if (!['employment', 'freelance', 'unknown'].includes(String(v.kind))) throw new Error('kind inválido');
+    if (typeof v.kind !== 'string' || !['employment', 'freelance', 'unknown'].includes(v.kind)) throw new Error('kind inválido');
     o.kind = v.kind as Kind;
   }
   for (const key of ['remote', 'recurring', 'growthPotential', 'relocationRequired'] as const) if (v[key] !== undefined) o[key] = bool(v[key], key);
   if (v.compensation !== undefined) {
     const c = object(v.compensation, 'compensation');
-    if (!['hour', 'month', 'project'].includes(String(c.period))) throw new Error('compensation.period inválido');
+    if (typeof c.period !== 'string' || !['hour', 'month', 'project'].includes(c.period)) throw new Error('compensation.period inválido');
     const currency = str(c.currency, 'currency').toUpperCase();
     if (!/^[A-Z]{3}$/.test(currency)) throw new Error('currency: código de tres letras requerido');
     o.compensation = { currency, period: c.period as Compensation['period'], min: positive(c.min, 'min', true) };
@@ -145,7 +145,7 @@ export function parseOpportunity(value: unknown): Opportunity {
 }
 export function parseProfile(value: unknown): Profile {
   const v = object(value, 'profile');
-  const p = { ...defaultProfile, skills: strings(v.skills ?? [], 'skills'), preferredKinds: [...defaultProfile.preferredKinds] };
+  const p = { ...defaultProfile, skills: strings(v.skills === undefined ? [] : v.skills, 'skills'), preferredKinds: [...defaultProfile.preferredKinds] };
   if (v.preferredKinds !== undefined) {
     const kinds = strings(v.preferredKinds, 'preferredKinds');
     if (!kinds.length || kinds.some(k => !['employment', 'freelance'].includes(k))) throw new Error('preferredKinds inválido');

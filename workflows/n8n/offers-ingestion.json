@@ -1,0 +1,114 @@
+{
+  "name": "offers-ingestion (inactive dry-run)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "manual",
+      "name": "Manual review",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "schedule",
+      "name": "Schedule (inactive until reviewed)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 60
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "worker",
+      "name": "Offers worker",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        260,
+        80
+      ],
+      "parameters": {
+        "authentication": "privateKey",
+        "resource": "command",
+        "operation": "execute",
+        "command": "/usr/local/bin/node /opt/offers/src/source-cli.ts --dry-run",
+        "cwd": "/opt/offers"
+      },
+      "retryOnFail": false
+    },
+    {
+      "id": "gate",
+      "name": "Validate dry-run result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        80
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const result = $input.first().json;\nif (result.code !== 0) throw new Error('Offers worker failed (exit ' + String(result.code) + '); inspect worker health.');\nlet summary;\ntry { summary = JSON.parse(result.stdout); } catch { throw new Error('Invalid Offers worker summary'); }\nif (summary.mode !== 'dry-run' || summary.confirmed !== false) throw new Error('Offers dry-run gate failed');\nif (!Array.isArray(summary.health) || !summary.health.some(s => ['ok', 'not_due'].includes(s.status))) throw new Error('No enabled healthy Offers sources');\nreturn [{ json: summary }];"
+      }
+    }
+  ],
+  "connections": {
+    "Manual review": {
+      "main": [
+        [
+          {
+            "node": "Offers worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule (inactive until reviewed)": {
+      "main": [
+        [
+          {
+            "node": "Offers worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Offers worker": {
+      "main": [
+        [
+          {
+            "node": "Validate dry-run result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC",
+    "executionTimeout": 3600,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false
+  },
+  "pinData": {},
+  "tags": []
+}

@@ -15,6 +15,24 @@ cat examples/opportunities.json | node src/cli.ts --input - --state data/offers.
 
 `node src/cli.ts` imprime JSON puro cuando se omite `--output`; `npm start` agrega el encabezado de npm. `--now` es opcional y permite evaluaciones reproducibles. Sin él se usa la hora actual. Errores van a stderr con código de salida 1. Se valida todo el lote antes de escribir.
 
+### Scaffold local de candidatura (opt-in)
+
+`--candidate` activa la generación local de un Markdown por oportunidad apta. Sin el flag no se lee información del candidato ni se crea ningún archivo. El destino por defecto es `output/candidacy/`; puede cambiarse con `--candidacy-dir`, que solo es válido junto con `--candidate`:
+
+```sh
+npm start -- --input examples/opportunities.json --profile examples/profile.json \
+  --candidate examples/candidate-facts.json --candidacy-dir output/candidacy \
+  --state data/offers.json --now 2026-09-16T12:00:00Z
+```
+
+El contrato `CandidateFacts` es cerrado y versionado. Exige `schemaVersion: 1`, `name`, `skills` y `highlights`; admite opcionalmente `headline`, `location` y `contact` con `email`, `phone` y enlaces HTTP/HTTPS. Rechaza campos desconocidos, valores nulos, listas con huecos, textos vacíos, emails inválidos y otros protocolos. Las habilidades se recortan, convierten a minúsculas y deduplican; el resto de los hechos solo se recorta. Ver `examples/candidate-facts.json`.
+
+Solo se construye un brief cuando la evaluación actual es `verified`, el screening no es `discarded` y la elegibilidad de empleo no es `ineligible`. Un estado de empleo `unknown` no se convierte en inelegible. El flujo no depende de la lista limitada de recomendaciones ni altera evaluación, perfil, estado o borradores existentes. `--candidacy-dir` se rechaza si apunta dentro de `drafts/`.
+
+`matched` y `missing` son la intersección y diferencia exactas entre `opportunity.skills` y las habilidades declaradas del candidato. `ratio` es `matched / opportunity.skills`; vale `null` si la vacante no declara habilidades. No se extraen requisitos de texto libre, no se interpretan equivalencias y no se inventan experiencia, competencias ni datos de contacto. El Markdown incluye hechos textuales, placeholders explícitos y el aviso **“Borrador interno, revisar antes de enviar”**. No envía aplicaciones.
+
+Cada archivo se llama `<id estable SHA-256>.md`. Se escribe mediante temporal y rename; si el contenido ya coincide no se reescribe, por lo que una segunda ejecución idéntica conserva bytes y fecha de modificación. No se eliminan archivos antiguos o ajenos del directorio.
+
 Para instalar las dependencias de desarrollo y comprobar tipos:
 
 ```sh
@@ -24,6 +42,62 @@ npm run check
 
 Se incluye lockfile. Las pruebas y CLI funcionan con el soporte TypeScript nativo de Node; `npm run check` comprueba los tipos con TypeScript.
 
+## Seguimiento local de postulaciones (Incremento 3)
+
+El seguimiento es opt-in y usa un archivo separado del estado de oportunidades. Sin ninguno de los flags `--tracking-*`, no se lee ni crea ese archivo y el contrato/salida anteriores permanecen iguales. No hay transporte externo, red ni integración con Notion en este modo.
+
+```sh
+# Importar un lote y mostrar métricas al corte
+npm start -- --tracking-state data/tracking.json \
+  --tracking-import eventos.json --tracking-cutoff 2026-09-16T12:00:00Z
+
+# Registrar un solo evento (el archivo contiene directamente el evento)
+npm start -- --tracking-state data/tracking.json \
+  --tracking-record evento.json --tracking-cutoff 2026-09-16T12:00:00Z
+
+# Reportar sin modificar el almacén
+npm start -- --tracking-state data/tracking.json \
+  --tracking-report --tracking-cutoff 2026-09-16T12:00:00Z
+```
+
+El envelope de importación es cerrado: `{ "schemaVersion": 1, "events": [...] }`. Cada evento también exige `schemaVersion: 1`, `eventId`, `type`, `occurredAt` y `recordedAt`, ambos timestamps UTC terminados en `Z`. Los tipos son:
+
+- `application`: `applicationId`, `opportunityId`, `attemptId`.
+- `response`: `applicationId`, `outcome` (`positive` o `negative`).
+- `interview`: `applicationId`, `status` (`scheduled`, `completed`, `cancelled` o `rescheduled`).
+- `offer`: `applicationId`, `status` (`received`, `accepted` o `declined`).
+
+`applicationId` es el SHA-256 determinista de `("application", opportunityId, attemptId)` y se valida al importar. Por ello dos intentos reales para la misma vacante usan `attemptId` distintos y son postulaciones separadas; reimportar el mismo `eventId` con los mismos bytes normalizados es idempotente. Reutilizarlo con otro contenido falla. Respuestas, entrevistas y ofertas deben referenciar una postulación existente, aunque la vacante después venza o sea descartada.
+
+Una corrección agrega otro evento del mismo tipo y postulación con `correctsEventId`; nunca sobrescribe el original. Solo se admite una corrección directa por evento, las cadenas no pueden formar ciclos y el historial completo queda reconstruible. `occurredAt` representa cuándo ocurrió el hecho y `recordedAt` cuándo quedó conocido localmente. Un reporte al corte incluye únicamente hechos con ambas fechas menores o iguales al corte; así un evento cargado tarde no reescribe una fotografía histórica.
+
+Las conversiones se cuentan una vez por postulación: respuesta si existe cualquier `response`, entrevista solo con estado `completed`, oferta si existe cualquier evento `offer`, y aceptación si existe `accepted`. Entrevistas canceladas, reprogramadas o meramente agendadas no convierten. Las tasas son respuestas/postulaciones, entrevistas/postulaciones, ofertas/postulaciones y aceptaciones/ofertas. Un denominador sin población produce `null`; no se imputan respuestas, no se extrapolan resultados y no hay predicciones.
+
+El almacén incluye revisión monotónica y checksum SHA-256. Todo el lote se valida antes de mutar; los eventos se ordenan de forma canónica. La escritura usa lock exclusivo, temporal sincronizado, `rename` atómico y sincronización del directorio. Corrupción, revisión concurrente, otro escritor o fallo de escritura cierran con error y no reinician silenciosamente el estado. Un lock residual tras una terminación abrupta debe inspeccionarse y retirarse manualmente solo tras confirmar que no hay escritor activo. No se soportan dos flags de importación a la vez ni mezclar el modo de seguimiento con el flujo de oportunidades.
+
+## Alertas externas canónicas
+
+`src/external-alerts.ts` define el límite mínimo para importar alertas ya estructuradas. No interpreta payloads de proveedores, correo, HTML ni webhooks, no hace scraping o red y no completa datos ausentes. El envelope canónico es:
+
+```json
+{
+  "schemaVersion": 1,
+  "alerts": [
+    {
+      "title": "Developer",
+      "company": "Example",
+      "source": "Example board",
+      "externalId": "job-123",
+      "skills": ["TypeScript"]
+    }
+  ]
+}
+```
+
+`title` y `company` son obligatorios y no vacíos. Cada alerta acepta exclusivamente los campos de `Opportunity` documentados abajo; `skills` puede omitirse y entonces queda como la lista vacía exigida por el contrato interno. `skills: null` se rechaza: solo la ausencia (o `undefined` en llamadas JavaScript) activa el valor por defecto. Las claves desconocidas se rechazan en el envelope, cada alerta y sus objetos `compensation`, `publicationEvidence` y `availability` para no perder información silenciosamente. `adaptExternalAlertEnvelope(value)` valida el lote completo y devuelve `Opportunity[]`; un error identifica de forma estable el índice de la alerta y no produce un resultado parcial. `alerts` debe ser un array, que puede estar vacío; se rechazan `null`, otros tipos y posiciones nulas o con huecos (arrays sparse de JavaScript), indicando `externalAlerts.alerts[i]` para la primera posición inválida.
+
+La única normalización es la ya definida por `parseOpportunity`: recorte exterior de textos, habilidades en minúsculas sin duplicados y moneda en mayúsculas. Los campos opcionales provistos se conservan. En particular, el adaptador nunca deriva ni crea `publishedAt`, `publicationEvidence`, `availability`, `compensation` o fechas. Tampoco deduplica: al entregar el resultado a `ingest`, se aplica exclusivamente la identidad existente descrita en “Identidad y persistencia”.
+
 ## Contratos
 
 `src/contracts.ts` contiene los tipos y validadores de runtime; las funciones de dominio esperan valores ya validados. Se acepta un objeto Opportunity o una lista JSON. Campos desconocidos se descartan, nunca se persisten.
@@ -31,7 +105,7 @@ Se incluye lockfile. Las pruebas y CLI funcionan con el soporte TypeScript nativ
 | Campo Opportunity | Regla |
 | --- | --- |
 | `title`, `company` | Texto no vacío obligatorio |
-| `skills` | Lista de textos, opcional (vacía por defecto), normalizada a minúsculas |
+| `skills` | Lista de textos sin huecos, opcional (vacía por defecto), normalizada a minúsculas; `null` se rechaza |
 | `description`, `source`, `externalId`, `url` | Opcionales; ID externo requiere fuente; URL HTTP/HTTPS |
 | `kind` | `employment`, `freelance` o `unknown`, opcional |
 | `remote`, `recurring`, `growthPotential`, `relocationRequired` | Booleanos opcionales, declarados manualmente |
@@ -42,6 +116,8 @@ Se incluye lockfile. Las pruebas y CLI funcionan con el soporte TypeScript nativ
 | `expiresAt` | Fecha real `YYYY-MM-DD`, inclusiva hasta terminar el día UTC |
 | `compensation` | Opcional: `currency`, `period` (`hour`, `month`, `project`), `min`, `max` opcional |
 | `compensation.hoursPerMonth`, `compensation.estimatedHours` | Números positivos opcionales; horas de proyecto necesarias para calcular su tarifa |
+
+Los enums `kind`, `compensation.period` y `availability.outcome` requieren strings con uno de los valores permitidos; arrays y objetos no se convierten a texto. La política de `skills` también se aplica al perfil: omisión o `undefined` produce `[]`, mientras que `null` se rechaza.
 
 Compensaciones finitas y no negativas; máximo >= mínimo. El perfil acepta habilidades, tipos preferidos, restricción remota y parámetros económicos. Valores por defecto: ambos tipos, sin restricción remota, objetivo USD 25/h, umbral freelance USD 25/h, presupuesto atractivo USD 2000, 160 horas/mes. Son **supuestos configurables**, no preferencias personales confirmadas. El perfil de ejemplo usa objetivo USD 35/h para mostrar la diferencia entre objetivo y umbral.
 
@@ -87,6 +163,23 @@ La vigencia máxima de disponibilidad es **24 horas**, con vencimiento inclusivo
 
 La API `upsertNotionRecords(records, config, transport, options?)` admite `options.revalidate`, `options.now` (reloj inyectado para pruebas) y `options.timeoutMs` (5000 por defecto; máximo 60000). El verificador recibe una copia de la oportunidad y un `AbortSignal`. Timeout, excepción o respuesta inválida bloquean sin usar Notion; los mensajes de excepción no se reflejan. No hay verificador de red ni credenciales incorporados. El módulo suministrado por un integrador es el responsable de consultar y entender la fuente, si decide habilitarlo.
 
+### Captura de evidencia (opt-in, `--capture-evidence`)
+
+`src/evidence-capture.ts` puede rellenar `publishedAt`, `publicationEvidence` y `availability` a partir de una comprobación HTTP real, pero solo cuando la CLI se ejecuta con `--capture-evidence`. Sin el flag no se hace ninguna llamada de red; el flujo local sigue igual.
+
+Reglas de captura:
+
+- **Nunca inventa `publishedAt`.** Solo lo acepta desde un bloque `<script type="application/ld+json">` cuyo `@type` sea `JobPosting` (o esté dentro de un `@graph`) con `datePosted` estructurado. Texto libre, metadatos ambiguos o fechas fuera de ese contrato se ignoran.
+- **Coincidencia de URL obligatoria.** `publicationEvidence.url` y `availability.url` siempre son `opportunity.url` (nunca la URL final tras redirecciones). Si el JSON-LD declara su propio `url` y no coincide con el de la oportunidad, esa entrada se descarta y no aporta fecha.
+- **Disponibilidad conservadora.** Un HTTP 200 por sí solo nunca es `open`; hace falta un `JobPosting` estructurado. `validThrough` vencido marca `closed`. 404/410 marcan `missing`. Cualquier otra combinación (sin `JobPosting`, status inesperado, content-type no permitido, tamaño excedido, error de red) cae en `ambiguous` o `error`, nunca en `open`.
+- **Protección SSRF.** Antes de cada conexión —incluida cada redirección— se resuelve el host y se rechazan direcciones loopback, privadas (RFC 1918), link-local, CGNAT, multicast/reservadas e IPv6 equivalentes (`::1`, `fc00::/7`, `fe80::/10`, `ff00::/8`). Solo se admite `http:`/`https:`, sin credenciales embebidas en la URL.
+- **Límites duros.** Timeout configurable (`timeoutMs`, 8000 ms por defecto), máximo de redirecciones (`maxRedirects`, 5), límite de tamaño de respuesta (`maxBytes`, 2 MB) verificado por `Content-Length` y por el cuerpo real, y content-type restringido a `text/html`/`application/xhtml+xml`.
+- **Ambigüedad = cierre.** Cualquier caso no cubierto explícitamente falla cerrado (`ambiguous` o `error`), nunca se asume éxito.
+
+La API es `captureEvidence(opportunity, { fetch, resolveHost?, now?, timeoutMs?, maxRedirects?, maxBytes? })`. `fetch` es una función inyectada `(request) => Promise<{status, headers, body}>` sin seguir redirecciones automáticamente (contrato `redirect: 'manual'`); el propio módulo revalida SSRF en cada salto antes de seguirlo. `resolveHost` es inyectable para pruebas deterministas; por defecto usa `dns.promises.lookup`. `createNodeCaptureFetch(maxBytes?)` provee la implementación real basada en `fetch` global de Node, con lectura en streaming acotada por `maxBytes`.
+
+En la CLI, `--capture-evidence` aplica esta captura a cada oportunidad del lote de entrada que tenga `url`, antes de `ingest`. Oportunidades sin `url` no se tocan. Cuando la captura completa (incluso con resultado `ambiguous`/`error`), `availability` se reemplaza con ese resultado y `publishedAt`/`publicationEvidence` solo se agregan si se encontraron; nunca se borra una fecha o evidencia previa que la nueva captura no reconfirmó. Una excepción inesperada en un registro individual no aborta el lote: ese registro queda sin cambios. No es compatible con el modo de seguimiento (`--tracking-*`). No escribe en Notion ni usa credenciales.
+
 ### Migración e historial
 
 Los JSON y estados versión 1 anteriores siguen cargando. Los ejemplos históricos permanecen intactos y quedan `unknown` al no tener evidencia estructurada; aunque mencionen una fecha en la descripción, no se les atribuye verificación. Para activarlos hay que comprobar la fuente y aportar los tres campos nuevos, incluida una publicación dentro del límite. No renovar artificialmente la fecha original.
@@ -117,11 +210,14 @@ Estado JSON versionado y validado al cargar; corrupción causa error, nunca rein
 ## Arquitectura y siguiente integración
 
 - `contracts.ts`: contrato y validación de entrada/perfil.
+- `external-alerts.ts`: envelope canónico estricto y conversión local a `Opportunity`.
 - `evaluate.ts`: clasificación, compensación, vencimiento y scores; sin I/O, fecha inyectada.
 - `screening.ts`: exclusiones y elegibilidad de empleo con incertidumbre explícita.
 - `recommendations.ts`: selección diaria con prioridad y balance.
 - `pipeline.ts`: identidad, ingesta y reporte, incluyendo una proyección local para Notion.
-- `cli.ts`: argumentos, lectura JSON y persistencia local.
+- `tracking.ts`: eventos de postulaciones, correcciones, métricas al corte y almacén local protegido.
+- `candidacy.ts`: contrato de hechos, gate, brief puro, Markdown y escritura atómica/idempotente.
+- `cli.ts`: argumentos, lectura JSON y persistencia local, con candidatura opt-in.
 - `test/offers.test.ts`: pruebas unitarias y de CLI en directorios temporales.
 
 `report.json` incluye registros, evaluaciones completas y `notion.records`. Cada proyección contiene `externalKey` estable, propiedades tipadas, explicación separada y tres propiedades explícitas de auditoría: `Origin` conserva únicamente `opportunity.source` (vacío si no fue informado), `Calculation assumptions` conserva los supuestos producidos por la normalización y `Explanation` serializa la evaluación calculada completa. El adaptador opcional `src/notion-sync.ts` genera los payloads a partir de estas propiedades y consulta la clave externa para resolver creación/actualización, sin mantener un caché de page IDs. La configuración y el esquema requerido se describen abajo.
@@ -190,7 +286,7 @@ Crear un archivo local de configuración **sin credenciales**, por ejemplo `noti
 }
 ```
 
-El ID ilustrativo debe sustituirse por el real. Es obligatorio especificar exactamente uno de `dataSourceId` o `databaseId`, y una propiedad para la clave externa. Los nombres no mapeados conservan su nombre local; se rechazan mapas desconocidos y colisiones. `enabled` es false si se omite. No hay variables de entorno, lectura de tokens ni autenticación incorporada; campos de configuración desconocidos (incluidos tokens) se rechazan sin reflejar sus valores.
+El ID ilustrativo debe sustituirse por el real. Es obligatorio especificar exactamente uno de `dataSourceId` o `databaseId`, y una propiedad para la clave externa. Los nombres no mapeados conservan su nombre local; se rechazan mapas desconocidos y colisiones. `enabled` es false si se omite. La configuración no admite credenciales; el transporte opcional `src/notion-transport.ts` lee `NOTION_API_KEY` del entorno. Los campos de configuración desconocidos (incluidos tokens) se rechazan sin reflejar sus valores.
 
 La migración requiere agregar `Verification` (select: verified/stale/unavailable/unknown), `Verification reasons` (rich_text) y `Published` (date), o mapearlos con `propertyMap`. Son obligatorios para los payloads nuevos; el programa no modifica el esquema remoto. El esquema real debe coincidir: la clave externa es `rich_text`, `Name` es `title`, y las otras propiedades deben tener los tipos de `notion.records[].properties`. El mapa solo cambia nombres, no tipos. No se crean ni verifican automáticamente propiedades remotas. `includeCalculationContext` es `false` por defecto para no romper bases existentes; al activarlo, deben existir `Origin`, `Calculation assumptions` y `Explanation` (todas `rich_text`), o sus nombres mapeados. Solo se envían las propiedades presentes de la proyección conocida y la clave externa; el objeto hermano `explanation`, recomendaciones completas y campos adicionales no se envían directamente. Los null/vacíos de la proyección sí limpian valores correspondientes. Las propiedades ajenas quedan intactas. Los límites de tamaño del servicio pueden producir fallos por registro; no se truncan datos silenciosamente.
 
@@ -204,12 +300,20 @@ npm start -- --input examples/opportunities.json --state data/offers.json --outp
 
 El dry-run mantiene la ingesta y escritura local habituales y agrega `notionPlan`: `records` contiene consulta y payloads candidatos solo para verificadas; `blocked` conserva claves, estados y motivos de exclusión. Usa la fecha del reporte, sin revalidación ni carga de módulos. `confirmed:false` indica que no se comprobó existencia remota, permisos ni esquema; no predice cantidades creadas/actualizadas. Puede usarse con `enabled:false`.
 
-La API exporta `validateNotionConfig`, `planNotionSync`, `queryExistingPages` y `upsertNotionRecords`. El transporte es una función asíncrona `HttpTransport(request) → { status, body }`, donde `body` es JSON ya decodificado; recibe método, URL fija de Notion, headers de versión y cuerpo. No depende de `fetch` global. La autenticación corresponde a un transporte provisto por el integrador, fuera de este proyecto; no incluir tokens en configuración, argumentos ni logs.
+La API exporta `validateNotionConfig`, `planNotionSync`, `queryExistingPages` y `upsertNotionRecords`. El transporte es una función asíncrona `HttpTransport(request) → { status, body }`, donde `body` es JSON ya decodificado; recibe método, URL fija de Notion, headers de versión y cuerpo. No depende de `fetch` global. El transporte opcional `src/notion-transport.ts` implementa autenticación por entorno; no incluir tokens en configuración, argumentos ni logs.
 
-La CLI admite `--notion-sync --notion-config notion-config.json --notion-transport ./transporte-local.mjs` únicamente con `enabled:true`. El módulo explícito debe exportar `transport` conforme al contrato anterior. Puede exportar también `revalidate(opportunity, signal) → Promise<AvailabilityEvidence>`. La CLI usa ese adaptador antes de consultar Notion, conserva su resultado incluso al bloquear y vuelve a generar el reporte/recomendaciones. La sincronización siempre usa el reloj real; `--now` solo controla el reporte local y dry-run. Es código de confianza con capacidad de ejecutar efectos al importarse: revisarlo antes de usarlo. No se incluye ni se ha ejecutado un transporte autenticado. El adaptador no imprime cuerpos, headers, IDs de respuesta ni mensajes de excepción del transporte; el transporte suministrado también debe abstenerse de registrar secretos.
+La CLI admite `--notion-sync --notion-config notion-config.json --notion-transport ./transporte-local.mjs` únicamente con `enabled:true`. El módulo explícito debe exportar `transport` conforme al contrato anterior. Puede exportar también `revalidate(opportunity, signal) → Promise<AvailabilityEvidence>`. La CLI usa ese adaptador antes de consultar Notion, conserva su resultado incluso al bloquear y vuelve a generar el reporte/recomendaciones. La sincronización siempre usa el reloj real; `--now` solo controla el reporte local y dry-run. Es código de confianza con capacidad de ejecutar efectos al importarse: revisarlo antes de usarlo. Se incluye `src/notion-transport.ts`; no se ha ejecutado contra Notion en este cambio. El adaptador no imprime cuerpos, headers, IDs de respuesta ni mensajes de excepción del transporte; el transporte suministrado también debe abstenerse de registrar secretos.
 
 Solo los registros que pasan el bloqueo de verificación consultan su `externalKey`: cero coincidencias crea, una compara propiedades y actualiza solo si cambiaron, más de una (o `has_more:true`) falla por ambigüedad. Una página archivada o en papelera también falla y nunca provoca una creación sustituta. Las claves repetidas dentro del mismo lote se omiten después de la primera con `duplicate_in_batch`. El límite de dos resultados permite detectar duplicados sin paginar toda la base. Se ignoran metadatos de lectura en la comparación. La respuesta incluye contadores `created`, `updated`, `skipped`, `failed` y resultados por índice con códigos de error controlados. Un bloqueo produce `skipped`, `reason: "verification_blocked"` y el estado/razones en `verification`; no cuenta como éxito de escritura. Creación/actualización exige HTTP 2xx y respuesta de página con ID; fallos de consulta nunca se interpretan como ausencia. Los errores por registro no detienen el lote y la CLI sale con código 1 si alguno falla.
 
 Las llamadas concurrentes dentro del mismo proceso se serializan por destino y clave. Esto no coordina procesos o máquinas distintos: no ejecutar dos procesos sincronizadores simultáneos sobre el mismo destino, porque consultar/crear no es una transacción y Notion no impone unicidad de la clave. No hay reintentos automáticos ante 429, timeouts o errores: una escritura sin respuesta puede haberse aplicado y se reporta como fallida; una ejecución posterior vuelve a consultar antes de escribir y reconcilia el valor ya aplicado. Conservar la clave externa y el mapa entre ejecuciones. Cambiar identidad o destino puede crear otras páginas.
 
 Las pruebas incluyen configuración, contexto de cálculo, creación, actualización, idempotencia, deduplicación de lote, página archivada, fallo después de escritura, concurrencia dentro del proceso, confirmación HTTP, errores aislados, secretos simulados y CLI dry-run. Todas usan transporte falso o ejecución local; `npm test` y `npm run check` no necesitan Notion.
+
+## Controlled mail → Notion dry-run automation
+
+See [the local cycle and VPS boundary](docs/automation.md). `npm run automation -- --account personal` runs mail ingestion and atomically saves a dry-run plan under `data/`; it never writes to Notion. The optional real environment-authenticated transport is now supplied in `src/notion-transport.ts`. The shared database schema is unverified, so the ignored local target config deliberately blocks payload generation until a mapping is verified.
+
+## Multi-source ingestion (dry-run only)
+
+The [Phase 1–5 source automation guide](docs/multi-source-automation.md) covers the source registry, Remotive/RSS and Greenhouse/Lever/Ashby adapters, DNS-pinned evidence capture, canonical deduplication/provenance, optional Claude suggestions, and inactive n8n exports. Review the disabled examples in `examples/sources.json`, then use `npm run sources -- --dry-run`. `npm run sources -- --health` checks the local checkpoint. This entrypoint cannot write to production Notion or activate workflows.
