@@ -11,7 +11,8 @@
     "start": "node src/cli.ts",
     "check": "tsc --noEmit",
     "automation": "node src/automation.ts",
-    "sources": "node src/source-cli.ts"
+    "sources": "node src/source-cli.ts",
+    "cycle:local-demo": "node src/local-cycle-demo.ts"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
