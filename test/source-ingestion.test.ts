@@ -41,9 +41,65 @@ for (const adapter of ['remotive', 'greenhouse', 'lever', 'ashby', 'rss'] as con
   const job = result.jobs[0]!;
   assert.equal(job.opportunity.title, 'Backend engineer'); assert.equal(job.opportunity.company, 'Acme');
   assert.equal(job.provenance[0]!.observedAt, now.toISOString()); assert.match(job.provenance[0]!.payloadHash, /^[a-f0-9]{64}$/);
-  assert.equal(job.opportunity.publishedAt, ['greenhouse', 'lever'].includes(adapter) ? undefined : '2026-09-18');
+  // Lever ya sí aporta fecha: su createdAt es epoch en milisegundos y no se reescribe.
+  // Greenhouse sigue sin ella porque la fixture no trae `first_published`, igual que boards reales.
+  assert.equal(job.opportunity.publishedAt, adapter === 'greenhouse' ? undefined : '2026-09-18');
   assert.equal(job.opportunity.availability?.outcome, ['rss', 'remotive'].includes(adapter) ? 'ambiguous' : 'open');
   assert.equal(job.opportunity.externalId, undefined);
+  // Ningún proveedor de esta tanda publica salario estructurado en la fixture.
+  assert.equal(job.opportunity.payDisclosure, 'not_published');
+  assert.equal(job.opportunity.compensation, undefined);
+});
+test('lever y ashby mapean modalidad, tipo de contrato y restricciones de ubicación', async () => {
+  const lever = adaptSource(source('lever'), await fixture('lever.json'), now).jobs[0]!.opportunity;
+  assert.equal(lever.remoteness, 'fully_remote');
+  assert.equal(lever.remote, true, 'el booleano se deriva de remoteness, no se declara aparte');
+  assert.equal(lever.employmentType, 'full_time');
+  assert.deepEqual(lever.locationRestrictions, undefined);
+  const ashby = adaptSource(source('ashby'), await fixture('ashby.json'), now).jobs[0]!.opportunity;
+  assert.equal(ashby.employmentType, 'full_time');
+  // Un epoch fuera de rango de calendario no se convierte en fecha: podría ser un identificador.
+  const raw = JSON.parse(await fixture('lever.json'));
+  for (const createdAt of [1, 946684799000, Date.now() + 86_400_000, -5, 'ayer']) {
+    const job = adaptSource(source('lever'), JSON.stringify([{ ...raw[0], createdAt }]), now).jobs[0]!;
+    assert.equal(job.opportunity.publishedAt, undefined, String(createdAt));
+    assert.ok(job.warnings.includes('publication_missing_or_invalid'));
+  }
+});
+test('greenhouse: el contenido doblemente escapado se reduce a texto sin markup ni entidades', async () => {
+  const body = JSON.parse(await fixture('greenhouse.json'));
+  // Forma real medida en boards/vercel: HTML escapado DOS veces (`&amp;nbsp;`, `&amp;lt;p&amp;gt;`).
+  const content = '&lt;p&gt;Build &amp;amp; ship&amp;nbsp;services&lt;/p&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;ul&gt;&lt;li&gt;TypeScript&lt;/li&gt;&lt;/ul&gt;';
+  const job = adaptSource(source('greenhouse'), JSON.stringify({ ...body, jobs: [{ ...body.jobs[0], content }] }), now).jobs[0]!;
+  const description = job.opportunity.description!;
+  assert.equal(description, 'Build & ship services TypeScript');
+  assert.ok(!/<[a-z/]/i.test(description), 'sin etiquetas');
+  assert.ok(!/&[a-z#0-9]{2,8};/i.test(description), 'sin entidades sin decodificar');
+  assert.ok(!description.includes('alert'), 'el contenido de script no sobrevive');
+  // Una descripción enorme se acota para que el store no crezca sin techo.
+  const huge = adaptSource(source('greenhouse'), JSON.stringify({ ...body, jobs: [{ ...body.jobs[0], content: 'a'.repeat(50_000) }] }), now).jobs[0]!;
+  assert.equal(huge.opportunity.description?.length, 20_000);
+});
+test('ashby: el salario estructurado se lee, y una cifra inverosímil queda unparsed sin inventarse', async () => {
+  const body = JSON.parse(await fixture('ashby.json'));
+  const withPay = (component: unknown, summary = '$211.4K - $290.6K') => JSON.stringify({ ...body,
+    jobs: [{ ...body.jobs[0], compensation: { scrapeableCompensationSalarySummary: summary, summaryComponents: component ? [component] : [] } }] });
+  const salary = { compensationType: 'Salary', interval: '1 YEAR', currencyCode: 'USD', minValue: 211400, maxValue: 290600 };
+  const ok = adaptSource(source('ashby'), withPay(salary), now).jobs[0]!.opportunity;
+  assert.deepEqual(ok.compensation, { currency: 'USD', period: 'year', min: 211400, max: 290600 });
+  assert.equal(ok.payDisclosure, 'published');
+  assert.equal(ok.payEvidence?.raw, '$211.4K - $290.6K');
+  // Medido en el board real de Vanta: 90 USD AL AÑO. Publicado por la fuente, pero no creíble.
+  const absurd = adaptSource(source('ashby'), withPay({ ...salary, minValue: 90, maxValue: 90 }, '$90'), now).jobs[0]!.opportunity;
+  assert.equal(absurd.payDisclosure, 'unparsed');
+  assert.equal(absurd.compensation, undefined, 'una cifra inverosímil no se convierte en dato');
+  assert.equal(absurd.payEvidence?.raw, '$90', 'pero sí se conserva lo que la fuente dijo');
+  // Equity sin salario no es salario; un resumen sin componentes queda unparsed.
+  const equity = adaptSource(source('ashby'), withPay({ compensationType: 'EquityPercentage', interval: 'NONE', currencyCode: null, minValue: null }), now).jobs[0]!.opportunity;
+  assert.equal(equity.payDisclosure, 'unparsed');
+  assert.equal(equity.compensation, undefined);
+  const nothing = adaptSource(source('ashby'), withPay(null, ''), now).jobs[0]!.opportunity;
+  assert.equal(nothing.payDisclosure, 'not_published');
 });
 test('malformed rows are isolated; malformed envelopes fail; unpublished Ashby and Greenhouse prospects are excluded', async () => {
   const body = JSON.parse(await fixture('ashby.json'));

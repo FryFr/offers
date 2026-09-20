@@ -47,9 +47,15 @@ function skillHit(haystack: string, skill: string, aliases: Record<string, strin
 }
 
 function geography(o: Opportunity, relocationTargets: readonly string[]): { points: number; signal: RelevanceSignal; blocker?: string } {
-  const locationText = canonical(o.location ?? '');
-  const saysRemote = o.remote === true || contains(locationText, 'remote') || contains(locationText, 'remoto');
-  const saysOnsite = o.remote === false || ONSITE_TERMS.some(term => contains(locationText, canonical(term)));
+  // Las restricciones declaradas por el proveedor entran al mismo texto: son la forma explícita
+  // de lo que la ubicación libre solo insinúa ("Remote" + locationRestrictions:["United States"]).
+  const locationText = canonical([o.location, ...(o.locationRestrictions ?? [])].filter(Boolean).join(' '));
+  // `remoteness` declarado manda sobre el texto. `partially_remote` e `hybrid` cuentan como
+  // presencial: ambos exigen vivir cerca de la oficina.
+  const declaredRemote = o.remoteness === 'fully_remote';
+  const declaredOnsite = o.remoteness !== undefined && o.remoteness !== 'unknown' && !declaredRemote;
+  const saysRemote = declaredRemote || (!declaredOnsite && (o.remote === true || contains(locationText, 'remote') || contains(locationText, 'remoto')));
+  const saysOnsite = declaredOnsite || (o.remoteness === undefined && (o.remote === false || ONSITE_TERMS.some(term => contains(locationText, canonical(term)))));
 
   if (saysRemote && !saysOnsite) {
     const compatible = matchedTerms(locationText, REMOTE_COMPATIBLE);
@@ -95,8 +101,12 @@ export function relevance(o: Opportunity, p: Profile, kind: Kind): Relevance {
 
   // Seniority (0-20). Sin declaración explícita se asume neutro, no bajo: muchas vacantes
   // senior reales no llevan la palabra en el título.
-  const belowFloor = matchedTerms(titleText, BELOW_FLOOR_TERMS);
-  const senior = matchedTerms(titleText, SENIOR_TERMS);
+  // Un nivel declarado por el proveedor manda sobre lo que insinúe el título.
+  const declaredLevels = o.seniority ?? [];
+  const declaredBelow = declaredLevels.filter(level => ['intern', 'junior'].includes(level));
+  const declaredSenior = declaredLevels.filter(level => ['senior', 'staff', 'principal', 'lead', 'director', 'executive'].includes(level));
+  const belowFloor = declaredLevels.length ? declaredBelow : matchedTerms(titleText, BELOW_FLOOR_TERMS);
+  const senior = declaredLevels.length ? declaredSenior : matchedTerms(titleText, SENIOR_TERMS);
   let seniorityPoints = 8;
   if (belowFloor.length) {
     seniorityPoints = 0;

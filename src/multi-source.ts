@@ -39,7 +39,13 @@ export async function collectSource(source: Source, now: Date, options: SafeRead
   let endpoint = source.endpoint; const jobs: CapturedJob[] = []; let rejected = 0;
   const seenIds = new Set<string>();
   for (let page = 0; page < 50; page++) {
+    // Un listado de Greenhouse con `content=true` incluye el HTML de cada oferta y llega a ~10 MB
+    // (medido 2026-09-20: databricks 9,6 MB, anthropic 8,9 MB). El cap global de 2 MB existe para
+    // no tragar respuestas enormes, no para prohibir un listado legítimo: se eleva solo donde hace
+    // falta, con techo duro, en vez de renunciar a la descripción del 70% del pool.
+    const heavyListing = source.adapter === 'greenhouse' && source.fetchContent;
     const response = await safeRead(endpoint, { ...options, headers: sourceHeaders(source, options.env ?? process.env),
+      ...(heavyListing ? { maxBytes: 16_000_000, timeoutMs: 30_000 } : {}),
       contentTypes: source.adapter === 'rss' ? ['application/rss+xml', 'application/xml', 'text/xml'] : ['application/json'] });
     if (response.status !== 200) throw new Error(response.status === 429 ? 'source_rate_limited' : 'source_http_error');
     const adapted = adaptSource(source, response.body, now, response.finalUrl);

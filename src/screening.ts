@@ -1,5 +1,6 @@
 import type { Kind, Opportunity, Profile } from './contracts.ts';
 import { canonical, contains } from './text.ts';
+import { normalizePay } from './compensation.ts';
 
 type Status = 'eligible' | 'ineligible' | 'unknown' | 'not_applicable';
 interface Decision { status: Status; reason: string }
@@ -15,9 +16,12 @@ export function screen(o: Opportunity, p: Profile, kind: Kind) {
   for (const industry of p.excludedIndustries) if (contains(text, canonical(industry))) matches.push(`Industria excluida: "${industry}"`);
 
   const c = o.compensation;
-  // Profile hours are useful for projections, but are not evidence of paid volume.
-  const monthly = c?.currency === 'USD' && (c.period === 'month' || (c.period === 'hour' && c.hoursPerMonth !== undefined))
-    ? { min: c.min * (c.period === 'hour' ? c.hoursPerMonth! : 1), max: (c.max ?? c.min) * (c.period === 'hour' ? c.hoursPerMonth! : 1) } : null;
+  const pay = normalizePay(c, p.hoursPerMonth);
+  // Profile hours are useful for projections, but are not evidence of paid volume: el gate solo
+  // acepta una cifra mensual que no descanse en horas supuestas. La proyección con horas del
+  // perfil alimenta `indicative`, que ordena pero no decide elegibilidad.
+  const monthly = pay.monthlyBasis === 'declared' ? pay.monthlyUsd : null;
+  const indicativeMonthly = pay.monthlyUsd;
   const threshold = (amount: number, strict: boolean): Decision => {
     const rule = `USD ${amount}/mes (${strict ? 'estrictamente mayor' : 'mínimo inclusivo'})`;
     if (!monthly) return { status: 'unknown', reason: `${rule}; falta compensación mensual USD o tarifa USD con horas mensuales declaradas` };
@@ -35,9 +39,21 @@ export function screen(o: Opportunity, p: Profile, kind: Kind) {
     : [salary, relocation].some(d => d.status === 'ineligible') ? 'ineligible'
     : [salary, relocation].some(d => d.status === 'unknown') ? 'unknown' : 'eligible';
   const notApplicable: Decision = { status: kind === 'freelance' ? 'not_applicable' : 'unknown', reason: 'Requiere clasificación como empleo' };
+  /**
+   * Señal ORIENTATIVA para ordenar, nunca para decidir elegibilidad. Acepta la proyección con
+   * horas del perfil y las conversiones de moneda que el gate rechaza, y va acotada por debajo
+   * de lo que otorga un salario publicado: un 6k/mes declarado siempre gana a una conjetura.
+   */
+  const indicative = indicativeMonthly === null
+    ? { status: 'unknown' as const, reason: o.payDisclosure === 'unparsed' ? 'La fuente publicó pago pero no se pudo interpretar' : 'Salario no publicado por la fuente', monthlyUsd: null }
+    : { status: indicativeMonthly.min >= p.employmentMinimumMonthlyUsd ? 'meets' as const : indicativeMonthly.max >= p.employmentMinimumMonthlyUsd ? 'partial' as const : 'below' as const,
+        reason: `Orientativo USD ${Math.round(indicativeMonthly.min)}–${Math.round(indicativeMonthly.max)}/mes (${pay.monthlyBasis === 'declared' ? 'base declarada' : 'proyectado con horas del perfil'}${pay.converted ? ', convertido de otra moneda' : ''})`,
+        monthlyUsd: indicativeMonthly };
   return {
     status: matches.length ? 'discarded' as const : 'retained' as const,
     reasons: matches,
     employment: { status, salary: applicable ? salary : notApplicable, target: applicable ? target : notApplicable, relocation: applicable ? relocation : notApplicable },
+    indicative,
+    payDisclosure: o.payDisclosure ?? (o.compensation ? 'published' : 'not_published'),
   };
 }

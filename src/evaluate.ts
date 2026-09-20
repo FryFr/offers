@@ -1,5 +1,6 @@
 import { screen } from './screening.ts';
 import { relevance } from './relevance.ts';
+import { normalizePay } from './compensation.ts';
 import type { Kind, Opportunity, Profile, VerificationStatus } from './contracts.ts';
 
 export const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -50,8 +51,15 @@ export function verification(o: Opportunity, now: Date, windowDays = PUBLICATION
     validUntil: a ? new Date(Math.min(Date.parse(a.checkedAt) + VERIFICATION_TTL_MS, o.publishedAt ? Date.parse(o.publishedAt) + (windowDays + 1) * 86_400_000 : Infinity, o.expiresAt ? Date.parse(o.expiresAt) + 86_400_000 : Infinity)).toISOString() : null };
 }
 
+/** Tipo de contrato declarado por el proveedor → tipo interno. `other` no decide nada. */
+const KIND_BY_EMPLOYMENT_TYPE: Partial<Record<NonNullable<Opportunity['employmentType']>, Kind>> = {
+  contract: 'freelance', temporary: 'freelance', full_time: 'employment', part_time: 'employment', internship: 'employment',
+};
 export function classify(o: Opportunity): { kind: Kind; reason: string } {
   if (o.kind && o.kind !== 'unknown') return { kind: o.kind, reason: 'Tipo declarado manualmente' };
+  // Un campo estructurado del proveedor vale más que diez palabras clave sobre texto libre.
+  const declared = o.employmentType && KIND_BY_EMPLOYMENT_TYPE[o.employmentType];
+  if (declared) return { kind: declared, reason: `Derivado de employmentType declarado por la fuente: ${o.employmentType}` };
   const text = `${o.title} ${o.description ?? ''}`.toLowerCase();
   const freelance = /\b(freelance|freelancer|contractor|por proyecto)\b/.test(text) || o.compensation?.period === 'project';
   const employment = /\b(empleo|empleado|indefinido|full[ -]time|part[ -]time|employment)\b/.test(text);
@@ -63,22 +71,10 @@ export interface Normalized {
   projectUsd: { min: number; max: number } | null;
   assumptions: string[];
 }
+/** Delega en la normalización única de `compensation.ts`; la firma se conserva por compatibilidad. */
 export function normalize(o: Opportunity, p: Profile): Normalized {
-  const n: Normalized = { hourlyUsd: null, monthlyUsd: null, projectUsd: null, assumptions: [] };
-  const c = o.compensation;
-  if (!c) { n.assumptions.push('Compensación no informada'); return n; }
-  if (c.currency !== 'USD') { n.assumptions.push(`Moneda ${c.currency} sin tasa de cambio; no se convierte`); return n; }
-  const range = { min: c.min, max: c.max ?? c.min };
-  const scale = (factor: number) => ({ min: range.min * factor, max: range.max * factor });
-  const hours = c.hoursPerMonth ?? p.hoursPerMonth;
-  if (c.period === 'hour') { n.hourlyUsd = range; n.monthlyUsd = scale(hours); n.assumptions.push(`Proyección mensual con ${hours} horas, sin garantía de volumen`); }
-  if (c.period === 'month') { n.monthlyUsd = range; n.hourlyUsd = scale(1 / hours); n.assumptions.push(`Equivalencia usando ${hours} horas/mes`); }
-  if (c.period === 'project') {
-    n.projectUsd = range;
-    if (c.estimatedHours) { n.hourlyUsd = scale(1 / c.estimatedHours); n.assumptions.push(`Proyecto estimado en ${c.estimatedHours} horas`); }
-    else n.assumptions.push('Proyecto sin horas estimadas; tarifa horaria desconocida');
-  }
-  return n;
+  const { hourlyUsd, monthlyUsd, projectUsd, assumptions } = normalizePay(o.compensation, p.hoursPerMonth);
+  return { hourlyUsd, monthlyUsd, projectUsd, assumptions };
 }
 export function expiration(o: Opportunity, now: Date): 'active' | 'expired' | 'unknown' {
   if (!Number.isFinite(now.getTime())) throw new Error('Fecha de evaluación inválida');

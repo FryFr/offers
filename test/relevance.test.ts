@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { relevance } from '../src/relevance.ts';
 import { canonical, contains, matchedTerms } from '../src/text.ts';
+import { readFile } from 'node:fs/promises';
 
 const profile = parseProfile({
   skills: ['typescript', 'node.js', 'postgresql'],
@@ -111,11 +112,43 @@ test('tiers: un bloqueo manda sobre el puntaje y la escala es monótona', () => 
   assert.equal(bloqueada.tier, 'off_target');
 });
 
+test('los campos estructurados del proveedor mandan sobre lo que insinúa el texto', () => {
+  // `remoteness` declarado gana al texto: un título que diga "Remote" no convierte en remoto
+  // una vacante que el proveedor marcó híbrida.
+  const hibrida = relevance(job({ title: 'Remote Software Engineer', remoteness: 'hybrid', location: 'Bogotá' }), profile, 'employment');
+  assert.ok(hibrida.blockers.includes('onsite_outside_relocation_targets'));
+  const remota = relevance(job({ remoteness: 'fully_remote' }), profile, 'employment');
+  assert.deepEqual(remota.blockers, []);
+  // `partially_remote` también exige vivir cerca: no es remoto.
+  assert.ok(relevance(job({ remoteness: 'partially_remote', location: 'Bogotá' }), profile, 'employment').blockers.includes('onsite_outside_relocation_targets'));
+  // Las restricciones declaradas se leen igual que si vinieran en el texto de ubicación.
+  assert.ok(relevance(job({ remoteness: 'fully_remote', locationRestrictions: ['United States'] }), profile, 'employment').blockers.includes('remote_region_excluded'));
+  // `seniority` declarada gana al regex del título.
+  const declaradaJunior = relevance(job({ title: 'Senior Software Engineer', seniority: ['junior'] }), profile, 'employment');
+  assert.ok(declaradaJunior.blockers.includes('seniority_below_floor'));
+  const declaradaStaff = relevance(job({ title: 'Software Engineer', seniority: ['staff'] }), profile, 'employment');
+  assert.ok(declaradaStaff.score > relevance(job({ title: 'Software Engineer' }), profile, 'employment').score);
+});
+
 test('relevance no muta la oportunidad ni el perfil', () => {
   const opportunity = job({ title: 'Senior Backend Engineer', description: 'Node and TypeScript', location: 'Berlin, Germany' });
   const before = JSON.stringify({ opportunity, profile });
   relevance(opportunity, profile, 'employment');
   assert.equal(JSON.stringify({ opportunity, profile }), before);
+});
+
+test('el perfil real no usa alias que sean palabras corrientes en inglés', async () => {
+  // Medido el 2026-09-20 sobre 3.464 ofertas reales: el alias "go" coincidía en 1.138 (33%)
+  // frente a 24 de "golang" — no era el lenguaje, era "go to", "go live", "let's go". Igual
+  // "next" (756 vs 100 de "next.js"), "api" (343) y "rest" (129, por "rest of the team").
+  // Un alias corriente infla el puntaje de habilidades de un tercio del pool y corrompe el orden.
+  const real = parseProfile(JSON.parse(await readFile(new URL('../examples/profile.json', import.meta.url), 'utf8')));
+  const variants = new Set([...real.skills, ...Object.values(real.relevance.skillAliases).flat()]);
+  for (const dangerous of ['go', 'next', 'api', 'rest', 'ts', 'ai', 'ml', 'it']) {
+    assert.ok(!variants.has(dangerous), `"${dangerous}" es una palabra corriente: usar la forma inequívoca`);
+  }
+  // La forma inequívoca sí debe estar, o se perdería la señal por completo.
+  assert.ok(variants.has('golang') && variants.has('next.js') && variants.has('restful'));
 });
 
 test('el perfil rechaza claves desconocidas y valores inválidos en relevance', () => {

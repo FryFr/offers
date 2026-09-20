@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { normalize, classify, expiration, evaluate, verification, PUBLICATION_WINDOW_DAYS } from '../src/evaluate.ts';
 import { identity, ingest, parseStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
+import { FX, FX_MAX_AGE_DAYS, toUsd } from '../src/fx.ts';
 
 const profile = parseProfile({ skills: ['TypeScript'], remoteOnly: true });
 const now = new Date('2026-09-16T12:00:00Z');
@@ -35,12 +36,29 @@ test('normaliza hora, mes y proyecto con rangos y supuestos', () => {
   assert.equal(project.monthlyUsd, null);
   assert.equal(project.projectUsd?.min, 2000);
 });
-test('no inventa tarifas, divisas ni volumen de proyectos', () => {
-  for (const compensation of [undefined, { currency: 'COP', period: 'hour' as const, min: 100000 }, { currency: 'USD', period: 'project' as const, min: 3000 }]) {
+test('no inventa tarifas ni volumen de proyectos; convierte solo con tasa declarada', () => {
+  // Sin compensación, con moneda fuera de la tabla, o proyecto sin horas: no se deriva tarifa.
+  for (const compensation of [undefined, { currency: 'KRW', period: 'hour' as const, min: 100000 }, { currency: 'USD', period: 'project' as const, min: 3000 }]) {
     const n = normalize(opportunity({ compensation }), profile);
     assert.equal(n.hourlyUsd, null);
     assert.ok(n.assumptions.length);
   }
+  // Una moneda cubierta SÍ se convierte, y la cifra arrastra la tasa y su fecha para que nadie
+  // la confunda con un dato del proveedor. Bloquearlas sería un falso negativo enorme en Europa.
+  const eur = normalize(opportunity({ compensation: { currency: 'EUR', period: 'year', min: 90000 } }), profile);
+  assert.ok(eur.monthlyUsd!.min > 8000 && eur.monthlyUsd!.min < 8200, `esperaba ~8.100 USD/mes, obtuve ${eur.monthlyUsd!.min}`);
+  assert.ok(eur.assumptions.some(a => a.includes('EUR') && a.includes(FX.asOf) && a.includes('no es cotización')));
+  const local = normalize(opportunity({ compensation: { currency: 'COP', period: 'month', min: 9_000_000 } }), profile);
+  assert.ok(local.monthlyUsd!.min < 3000, 'un salario local convertido debe quedar por debajo del umbral, no fuera de la evaluación');
+});
+
+test('la tabla de cambio es estática, versionada y falla cuando envejece', () => {
+  const ageDays = (Date.now() - Date.parse(FX.asOf)) / 86_400_000;
+  assert.ok(ageDays >= 0, 'la tabla no puede tener fecha futura');
+  assert.ok(ageDays <= FX_MAX_AGE_DAYS, `la tabla tiene ${Math.round(ageDays)} días: refrescar src/fx.ts a mano`);
+  assert.equal(FX.rates.USD, 1);
+  assert.equal(toUsd(100, 'KRW'), null, 'una moneda sin tasa no se estima');
+  assert.equal(toUsd(100, 'usd')?.converted, false, 'USD no se marca como convertido');
 });
 test('clasificación explícita prevalece y ambigüedad requiere revisión', () => {
   assert.equal(classify(opportunity({ title: 'Full-time freelancer' })).kind, 'freelance');
@@ -167,10 +185,20 @@ test('empleo: límites inclusivos, objetivo, relocalización estricta y rangos i
   assert.equal(evaluate(opportunity({ kind: 'employment', compensation: { currency: 'USD', period: 'month', min: 7000 } }), profile, now).screening.employment.status, 'unknown');
 });
 
-test('empleo: información ausente, otras divisas y proyecciones no inventan elegibilidad', () => {
-  for (const compensation of [undefined, { currency: 'COP', period: 'month' as const, min: 9000000 }, { currency: 'USD', period: 'hour' as const, min: 50 }, { currency: 'USD', period: 'project' as const, min: 9000 }]) {
+test('empleo: información ausente, divisas sin tasa y proyecciones no inventan elegibilidad', () => {
+  // Una tarifa horaria sin horas declaradas NO habilita el gate: las horas del perfil sirven
+  // para proyectar, no son evidencia de volumen pagado.
+  for (const compensation of [undefined, { currency: 'KRW', period: 'month' as const, min: 9000000 }, { currency: 'USD', period: 'hour' as const, min: 50 }, { currency: 'USD', period: 'project' as const, min: 9000 }]) {
     assert.equal(evaluate(opportunity({ kind: 'employment', relocationRequired: false, compensation }), profile, now).screening.employment.status, 'unknown');
   }
+  // Pero sí alimenta la señal orientativa, que ordena sin decidir.
+  const proyectada = evaluate(opportunity({ kind: 'employment', relocationRequired: false, compensation: { currency: 'USD', period: 'hour', min: 50 } }), profile, now).screening;
+  assert.equal(proyectada.employment.salary.status, 'unknown');
+  assert.equal(proyectada.indicative.status, 'meets');
+  assert.ok(proyectada.indicative.reason.includes('proyectado con horas del perfil'));
+  // Una moneda con tasa sí se evalúa: un salario local queda por debajo del umbral, no fuera.
+  assert.equal(evaluate(opportunity({ kind: 'employment', relocationRequired: false, compensation: { currency: 'COP', period: 'month', min: 9_000_000 } }), profile, now).screening.employment.status, 'ineligible');
+  assert.equal(evaluate(opportunity({ kind: 'employment' }), profile, now).screening.payDisclosure, 'not_published');
   assert.equal(evaluate(opportunity({ kind: 'employment', relocationRequired: false, compensation: { currency: 'USD', period: 'hour', min: 30, hoursPerMonth: 100 } }), profile, now).screening.employment.status, 'eligible');
   assert.equal(evaluate(opportunity(), profile, now).screening.employment.status, 'not_applicable');
   assert.equal(evaluate(opportunity({ kind: 'unknown' }), profile, now).screening.employment.status, 'unknown');

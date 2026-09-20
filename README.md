@@ -205,6 +205,18 @@ Solo las verificadas y no excluidas por screening generan payloads activos. Las 
 
 SHA-256 de la primera identidad disponible: `(source, externalId)`; de lo contrario URL sin fragmento, tracking `utm_*`, `fbclid`, `gclid`, con query ordenada; finalmente `(company, title)` normalizados. No modifica mayúsculas del ID externo ni parámetros funcionales de la URL.
 
+### Modelo extendido y compensación
+
+`parseOpportunity` **rechaza claves desconocidas** (`OPPORTUNITY_KEYS`): un adaptador que emita un campo no contemplado falla ruidosamente en vez de perder el dato en silencio.
+
+- `remoteness` tiene seis niveles en vez de un booleano. Un booleano colapsa híbrido en "remoto" o "presencial" y ambas lecturas son falsas: híbrido exige vivir en la ciudad. `remote` se conserva y **se deriva** de `remoteness`; si llegan ambos en desacuerdo, se lanza.
+- `seniority`, `employmentType` y `locationRestrictions` recogen lo que el proveedor declara; `classify()` prefiere `employmentType` sobre el regex de texto libre.
+- `payDisclosure` distingue tres casos que antes se confundían en "sin compensación": `not_published` (la fuente no publica salario), `unparsed` (lo publica y no se pudo interpretar) y `published`. Lo fija el adaptador con lo que vio; **nunca se infiere aguas abajo**. `payEvidence` conserva la cita literal.
+- `Compensation.period` admite `hour|day|week|month|year|project`. La normalización vive en **un solo lugar** (`src/compensation.ts`): antes estaba duplicada con dos matemáticas divergentes entre `screening` y `evaluate`.
+- `src/fx.ts` convierte monedas con una tabla **estática, versionada y fechada**. No es cotización y cada cifra derivada lo dice. Una prueba falla cuando la tabla supera los 180 días, para que la refresque una persona. Una moneda fuera de la tabla no se estima: se deja sin evaluar.
+
+El gate de elegibilidad **no se afloja**: solo acepta una cifra mensual que no descanse en horas supuestas. La proyección con las horas del perfil y las conversiones de moneda alimentan una decisión paralela `indicative`, que ordena pero nunca decide.
+
 La ingesta hace upsert: el último objeto de una identidad reemplaza completamente el actual, no es un patch. Las versiones anteriores se conservan en `history`, con su evidencia de publicación y disponibilidad, **acotadas a las `MAX_HISTORY` (5) revisiones más recientes por registro**: sin ese tope, un cambio de contrato reescribe miles de registros a la vez y el store crece sin techo. Las revisiones descartadas son las más antiguas; el store no reconstruye lecturas anteriores a ese corte. Repetir la entrada actual no agrega registros ni historial; con `--now` fijo también es idéntico el reporte. El estado almacena datos fuente, no scores desactualizados; todo se reevalúa con el perfil y fecha actuales. No se borra lo que falta en un lote nuevo.
 
 Límite deliberado: no hay deduplicación difusa ni unión entre fuentes. Agregar un ID o URL a una entrada previamente identificada por título puede crear otra identidad. Dos vacantes con igual empresa/título necesitan URL o ID distintos. El fallback puede fusionarlas si no se proporcionan. Para actualizar títulos con estabilidad, usar fuente/ID desde el inicio.

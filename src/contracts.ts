@@ -8,14 +8,35 @@ export interface AvailabilityEvidence {
   httpStatus?: number;
   evidence?: string;
 }
+/** Intervalos que declaran los proveedores. Sin `year` y `week`, una banda anual no entra. */
+export const COMPENSATION_PERIODS = ['hour', 'day', 'week', 'month', 'year', 'project'] as const;
+export type CompensationPeriod = typeof COMPENSATION_PERIODS[number];
 export interface Compensation {
   currency: string;
-  period: 'hour' | 'month' | 'project';
+  period: CompensationPeriod;
   min: number;
   max?: number;
   hoursPerMonth?: number;
   estimatedHours?: number;
 }
+/**
+ * Seis niveles, no un booleano. Un booleano colapsa híbrido en "no remoto" o "remoto" y las dos
+ * lecturas son falsas: híbrido exige vivir en la ciudad, igual que presencial.
+ */
+export const REMOTENESS_LEVELS = ['unknown', 'in_person', 'hybrid', 'partially_remote', 'fully_remote'] as const;
+export type Remoteness = typeof REMOTENESS_LEVELS[number];
+export const SENIORITY_LEVELS = ['intern', 'junior', 'mid', 'senior', 'staff', 'principal', 'lead', 'director', 'executive'] as const;
+export type Seniority = typeof SENIORITY_LEVELS[number];
+export const EMPLOYMENT_TYPES = ['full_time', 'part_time', 'contract', 'internship', 'temporary', 'other'] as const;
+export type EmploymentType = typeof EMPLOYMENT_TYPES[number];
+/**
+ * Distingue tres cosas que antes se confundían en "sin compensación": el proveedor no publica
+ * salario, lo publica y no supimos leerlo, o lo publica y lo leímos. Lo fija el adaptador con
+ * lo que vio; nunca se infiere aguas abajo.
+ */
+export const PAY_DISCLOSURES = ['published', 'not_published', 'unparsed'] as const;
+export type PayDisclosure = typeof PAY_DISCLOSURES[number];
+export interface PayEvidence { field: string; raw: string; converted?: boolean }
 export interface Opportunity {
   title: string;
   company: string;
@@ -26,10 +47,16 @@ export interface Opportunity {
   kind?: Kind;
   skills: string[];
   remote?: boolean;
+  remoteness?: Remoteness;
+  seniority?: Seniority[];
+  employmentType?: EmploymentType;
+  locationRestrictions?: string[];
   relocationRequired?: boolean;
   location?: string;
   industry?: string;
   compensation?: Compensation;
+  payDisclosure?: PayDisclosure;
+  payEvidence?: PayEvidence;
   expiresAt?: string;
   publishedAt?: string;
   publicationEvidence?: PublicationEvidence;
@@ -96,6 +123,10 @@ function strings(value: unknown, name: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${name}: se esperaba una lista`);
   return [...new Set(Array.from(value, v => str(v, name).toLowerCase()))];
 }
+function oneOf<T extends readonly string[]>(value: unknown, allowed: T, name: string): T[number] {
+  if (typeof value !== 'string' || !allowed.includes(value)) throw new Error(`${name}: uno de ${allowed.join(', ')}`);
+  return value as T[number];
+}
 function bool(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new Error(`${name}: booleano requerido`);
   return value;
@@ -126,8 +157,19 @@ export function parseAvailability(value: unknown): AvailabilityEvidence {
   if (v.evidence !== undefined) result.evidence = str(v.evidence, 'availability.evidence');
   return result;
 }
+/**
+ * Claves conocidas de `Opportunity`. `parseOpportunity` rechaza cualquier otra en vez de
+ * descartarla en silencio: un adaptador que emita `visaSponsorship` o `salary` debe fallar
+ * ruidosamente, no perder el dato sin que ninguna prueba lo note.
+ */
+export const OPPORTUNITY_KEYS = ['title', 'company', 'description', 'source', 'externalId', 'url', 'kind', 'skills',
+  'remote', 'remoteness', 'seniority', 'employmentType', 'locationRestrictions', 'relocationRequired', 'location',
+  'industry', 'compensation', 'payDisclosure', 'payEvidence', 'expiresAt', 'publishedAt', 'publicationEvidence',
+  'availability', 'recurring', 'growthPotential'] as const;
 export function parseOpportunity(value: unknown): Opportunity {
   const v = object(value, 'opportunity');
+  const unknownKey = Object.keys(v).find(k => !OPPORTUNITY_KEYS.includes(k as typeof OPPORTUNITY_KEYS[number]));
+  if (unknownKey) throw new Error(`opportunity: clave desconocida "${unknownKey}"`);
   const o: Opportunity = { title: str(v.title, 'title'), company: str(v.company, 'company'), skills: strings(v.skills === undefined ? [] : v.skills, 'skills') };
   for (const key of ['description', 'source', 'externalId', 'url', 'expiresAt', 'location', 'industry'] as const) {
     if (v[key] !== undefined) o[key] = str(v[key], key);
@@ -152,9 +194,28 @@ export function parseOpportunity(value: unknown): Opportunity {
     o.kind = v.kind as Kind;
   }
   for (const key of ['remote', 'recurring', 'growthPotential', 'relocationRequired'] as const) if (v[key] !== undefined) o[key] = bool(v[key], key);
+  if (v.remoteness !== undefined) o.remoteness = oneOf(v.remoteness, REMOTENESS_LEVELS, 'remoteness');
+  if (v.employmentType !== undefined) o.employmentType = oneOf(v.employmentType, EMPLOYMENT_TYPES, 'employmentType');
+  if (v.payDisclosure !== undefined) o.payDisclosure = oneOf(v.payDisclosure, PAY_DISCLOSURES, 'payDisclosure');
+  if (v.seniority !== undefined) {
+    if (!Array.isArray(v.seniority) || !v.seniority.length) throw new Error('seniority: lista no vacía requerida');
+    o.seniority = [...new Set(v.seniority.map(level => oneOf(level, SENIORITY_LEVELS, 'seniority')))];
+  }
+  if (v.locationRestrictions !== undefined) o.locationRestrictions = strings(v.locationRestrictions, 'locationRestrictions');
+  if (v.payEvidence !== undefined) {
+    const e = object(v.payEvidence, 'payEvidence');
+    o.payEvidence = { field: str(e.field, 'payEvidence.field'), raw: str(e.raw, 'payEvidence.raw'), ...(e.converted !== undefined ? { converted: bool(e.converted, 'payEvidence.converted') } : {}) };
+  }
+  // `remote` se conserva por compatibilidad pero deriva de `remoteness` cuando ambos vienen:
+  // dos fuentes de verdad en desacuerdo son un error del adaptador, no un dato que promediar.
+  if (o.remoteness !== undefined) {
+    const derived = o.remoteness === 'fully_remote';
+    if (o.remote !== undefined && o.remote !== derived) throw new Error('remote contradice remoteness');
+    o.remote = derived;
+  }
   if (v.compensation !== undefined) {
     const c = object(v.compensation, 'compensation');
-    if (typeof c.period !== 'string' || !['hour', 'month', 'project'].includes(c.period)) throw new Error('compensation.period inválido');
+    if (typeof c.period !== 'string' || !COMPENSATION_PERIODS.includes(c.period as CompensationPeriod)) throw new Error('compensation.period inválido');
     const currency = str(c.currency, 'currency').toUpperCase();
     if (!/^[A-Z]{3}$/.test(currency)) throw new Error('currency: código de tres letras requerido');
     o.compensation = { currency, period: c.period as Compensation['period'], min: positive(c.min, 'min', true) };

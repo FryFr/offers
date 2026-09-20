@@ -15,7 +15,6 @@
       "company": "Stripe",
       "enabled": true,
       "captureHtml": false,
-      "fetchContent": false,
       "minIntervalMinutes": 60
     },
     {
@@ -25,7 +24,6 @@
       "company": "Anthropic",
       "enabled": true,
       "captureHtml": false,
-      "fetchContent": false,
       "minIntervalMinutes": 60
     },
     {
@@ -35,7 +33,6 @@
       "company": "Databricks",
       "enabled": true,
       "captureHtml": false,
-      "fetchContent": false,
       "minIntervalMinutes": 60
     },
     {
@@ -45,7 +42,6 @@
       "company": "GitLab",
       "enabled": true,
       "captureHtml": false,
-      "fetchContent": false,
       "minIntervalMinutes": 60
     },
     {
@@ -55,7 +51,6 @@
       "company": "Reddit",
       "enabled": true,
       "captureHtml": false,
-      "fetchContent": false,
       "minIntervalMinutes": 60
     },
     {
@@ -65,7 +60,6 @@
       "company": "Scale AI",
       "enabled": true,
       "captureHtml": false,
-      "fetchContent": false,
       "minIntervalMinutes": 60
     },
     {

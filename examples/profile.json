@@ -1,6 +1,6 @@
 {
   "skills": [
-    "typescript", "javascript", "node.js", "react", "next.js", "go",
+    "typescript", "javascript", "node.js", "react", "next.js", "golang",
     "python", "postgresql", "docker", "kubernetes", "aws", "terraform",
     "graphql", "rest api", "microservices", "ci/cd", "testing"
   ],
@@ -38,16 +38,15 @@
       "recepcionista", "vendedor", "contador", "abogado", "enfermera"
     ],
     "skillAliases": {
-      "node.js": ["node", "nodejs", "node js"],
-      "next.js": ["next", "nextjs", "next js"],
-      "typescript": ["ts"],
+      "node.js": ["nodejs", "node js"],
+      "next.js": ["nextjs", "next js"],
       "javascript": ["js", "ecmascript"],
       "postgresql": ["postgres", "psql"],
       "kubernetes": ["k8s"],
       "ci/cd": ["ci cd", "continuous integration", "continuous delivery", "continuous deployment"],
-      "rest api": ["rest", "restful", "api"],
+      "rest api": ["restful"],
       "aws": ["amazon web services"],
-      "go": ["golang"],
+      "golang": ["go lang"],
       "react": ["react js", "reactjs"],
       "graphql": ["apollo"],
       "testing": ["unit testing", "test automation", "tdd"]
