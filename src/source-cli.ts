@@ -287,7 +287,13 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
     } catch (error) {
       const message = error instanceof Error ? error.message : '';
       if (error instanceof SchemaMismatch) {
-        console.error(`notion_schema_mismatch\n${JSON.stringify(error.issues, null, 2)}`);
+        // Observado el 2026-09-21: minutos después de crear columnas con --apply-schema, una
+        // lectura devolvió el esquema anterior mientras cinco lecturas posteriores lo daban por
+        // completo. Abortar sigue siendo lo correcto —escribir contra un esquema equivocado
+        // devuelve 400 en cada registro—, pero conviene decir que puede ser una lectura vieja.
+        console.error(`notion_schema_mismatch\n${JSON.stringify(error.issues, null, 2)}\n`
+          + 'Si acabas de crear estas propiedades, puede ser una lectura desactualizada de Notion:\n'
+          + 'comprueba con `bin/offers --verify-schema` y reintenta. Si persiste, faltan de verdad.');
         return 8;
       }
       if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
