@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { report, ingest } from '../src/pipeline.ts';
 import { parseAvailability, parseProfile } from '../src/contracts.ts';
-import { validateNotionConfig, planNotionSync as planSync, queryExistingPages, upsertNotionRecords as upsertSync, verifyNotionSchema, DEFAULT_PACING_MS, type HttpTransport, type HttpRequest } from '../src/notion-sync.ts';
+import { validateNotionConfig, planNotionSync as planSync, queryExistingPages, upsertNotionRecords as upsertSync, verifyNotionSchema, applyNotionSchema, DEFAULT_PACING_MS, type HttpTransport, type HttpRequest } from '../src/notion-sync.ts';
 const config = { enabled: true, dataSourceId: '12345678-1234-1234-1234-123456789012', externalKeyProperty: 'External key' };
 const now = new Date('2026-09-16T12:00:00Z');
 const evidence = { url: 'https://example.com/job', publishedAt: '2026-09-16', publicationEvidence: { url: 'https://example.com/job', excerpt: 'Published 2026-09-16', observedAt: now.toISOString() }, availability: { url: 'https://example.com/job', checkedAt: now.toISOString(), outcome: 'open' as const, httpStatus: 200, evidence: 'Active application form for this job' } };
@@ -58,7 +58,16 @@ test('Notion: contexto de cálculo es explícito y opt-in para preservar esquema
   const projected = row.properties;
   assert.equal(projected.Origin.rich_text.map(v => v.text.content).join(''), 'Manual board');
   assert.deepEqual(projected['Calculation assumptions'].rich_text.map(v => v.text.content), row.explanation.normalized.assumptions);
-  assert.deepEqual(JSON.parse(projected.Explanation.rich_text.map(v => v.text.content).join('')), row.explanation);
+  // `Explanation` omite los sellos del ciclo (`evaluatedAt`, `verification.validUntil`): cambian
+  // en cada corrida y hacían que toda página se reescribiera aunque la vacante fuera idéntica.
+  const explained = JSON.parse(projected.Explanation.rich_text.map(v => v.text.content).join(''));
+  const { evaluatedAt, verification, ...restoEsperado } = row.explanation;
+  const { validUntil, ...verificacionEstable } = verification;
+  assert.deepEqual(explained, { ...restoEsperado, verification: verificacionEstable });
+  assert.equal('evaluatedAt' in explained, false);
+  assert.equal('validUntil' in explained.verification, false);
+  // Lo volátil sigue disponible donde no rompe la idempotencia.
+  assert.ok(row.explanation.evaluatedAt);
   const configured = { ...config, includeCalculationContext: true, propertyMap: { Origin: 'Fuente', Explanation: 'Explicación', 'Calculation assumptions': 'Supuestos' } };
   const props = planNotionSync([row], configured).records[0]!.create.body.properties as Record<string, unknown>;
   assert.ok(props.Fuente);
@@ -196,6 +205,44 @@ test('el esquema se comprueba contra la base y dice QUÉ falta', async () => {
   // Sin esquema en la respuesta no se puede afirmar nada: se falla en vez de suponer que está bien.
   await assert.rejects(verifyNotionSchema(config, async () => ({ status: 200, body: { object: 'data_source' } })), /notion_schema_unreadable/);
   await assert.rejects(verifyNotionSchema(config, async () => ({ status: 404, body: null })), /notion_schema_unreadable/);
+});
+
+test('--apply-schema añade solo lo que falta y nunca cambia un tipo existente', async () => {
+  const full = {
+    Name: { type: 'title' }, Company: { type: 'rich_text' }, URL: { type: 'url' }, Type: { type: 'select' },
+    Expiration: { type: 'select' }, Deadline: { type: 'date' }, Verification: { type: 'select' },
+    'Verification reasons': { type: 'rich_text' }, Published: { type: 'date' }, Screening: { type: 'select' },
+    'Screening reasons': { type: 'rich_text' }, 'Employment eligibility': { type: 'select' },
+    Location: { type: 'rich_text' }, Relocation: { type: 'select' }, 'Recommendation rank': { type: 'number' },
+    'Recommendation priority': { type: 'number' }, Relevance: { type: 'number' }, 'Relevance tier': { type: 'select' },
+    'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
+    'Freelance review': { type: 'select' }, 'External key': { type: 'rich_text' },
+  } as Record<string, { type: string }>;
+  const base = (properties: Record<string, { type: string }>) => {
+    const patches: Record<string, unknown>[] = [];
+    const transport: HttpTransport = async request => {
+      if (request.method === 'GET') return { status: 200, body: { object: 'data_source', properties } };
+      patches.push(request.body);
+      return { status: 200, body: { object: 'data_source' } };
+    };
+    return { transport, patches };
+  };
+  // Faltan dos: se crean con su tipo y nada más viaja en el PATCH.
+  const { Relevance: _a, 'Relevance tier': _b, ...incompleto } = full;
+  const faltan = base(incompleto);
+  const result = await applyNotionSchema(config, faltan.transport);
+  assert.deepEqual(result.added, ['Relevance', 'Relevance tier']);
+  assert.deepEqual(faltan.patches, [{ properties: { Relevance: { number: {} }, 'Relevance tier': { select: {} } } }]);
+  // Idempotente: con el esquema completo no se envía ningún PATCH.
+  const completo = base(full);
+  assert.deepEqual((await applyNotionSchema(config, completo.transport)).added, []);
+  assert.equal(completo.patches.length, 0);
+  // Un tipo equivocado NO se corrige solo: cambiarlo puede vaciar la columna en Notion.
+  const malTipo = base({ ...full, Relevance: { type: 'rich_text' } });
+  const conflicto = await applyNotionSchema(config, malTipo.transport);
+  assert.deepEqual(conflicto.added, []);
+  assert.deepEqual(conflicto.unresolved, [{ property: 'Relevance', problem: 'wrong_type', expected: 'number', found: 'rich_text' }]);
+  assert.equal(malTipo.patches.length, 0, 'no se toca una columna existente');
 });
 
 test('el lote se acota y se pausa entre registros para respetar el límite de Notion', async () => {

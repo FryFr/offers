@@ -71,6 +71,20 @@ export function ingest(store: Store, input: unknown): Store {
   }
   return { version: 1, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
 }
+/**
+ * La evaluación sin los sellos del CICLO que la produjo.
+ *
+ * `evaluatedAt` dice cuándo corrimos, no algo de la oferta; `validUntil` deriva de la última
+ * re-comprobación, así que avanza cada hora. Incrustarlos en la propiedad `Explanation` hacía que
+ * el payload cambiara en cada ejecución aunque la vacante fuera idéntica: medido contra la base
+ * real, un segundo `--sync` sin ningún cambio reportaba `updated: 3` en vez de `unchanged`, y
+ * habría reescrito las 780 páginas en cada ciclo. Notion ya registra cuándo se editó cada página.
+ */
+function withoutRunStamps(evaluation: ReturnType<typeof evaluate>) {
+  const { evaluatedAt: _when, verification, ...rest } = evaluation;
+  const { validUntil: _until, ...stableVerification } = verification;
+  return { ...rest, verification: stableVerification };
+}
 export function report(store: Store, profile: Profile, now: Date, options: { delivered?: ReadonlySet<string> } = {}) {
   const records = store.records.map(r => ({ ...r, evaluation: evaluate(r.opportunity, profile, now),
     historicalEvaluations: (r.history ?? []).map(opportunity => ({ opportunity, evaluation: evaluate(opportunity, profile, now) })) }));
@@ -114,7 +128,7 @@ export function report(store: Store, profile: Profile, now: Date, options: { del
           'Freelance review': { select: { name: r.evaluation.freelanceReview.status } },
           Origin: { rich_text: notionRichText(r.opportunity.source ? [r.opportunity.source] : []) },
           'Calculation assumptions': { rich_text: notionRichText(r.evaluation.normalized.assumptions) },
-          Explanation: { rich_text: notionRichText([JSON.stringify(r.evaluation)]) },
+          Explanation: { rich_text: notionRichText([JSON.stringify(withoutRunStamps(r.evaluation))]) },
         },
         explanation: r.evaluation,
       })),

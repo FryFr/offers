@@ -82,6 +82,27 @@ export async function verifyNotionSchema(value: unknown, transport: HttpTranspor
   }
   return { ok: !issues.length, issues };
 }
+/**
+ * Crea en la base SOLO las propiedades que faltan.
+ *
+ * Deliberadamente NO toca las que existen con otro tipo: cambiar el tipo de una columna en Notion
+ * puede vaciar lo que ya contiene, y eso es una decisión de una persona mirando sus datos, no de
+ * un script. Esos casos se reportan y se quedan como están.
+ *
+ * Es aditivo e idempotente: correrlo dos veces no hace nada la segunda vez.
+ */
+export async function applyNotionSchema(value: unknown, transport: HttpTransport): Promise<{ added: string[]; unresolved: SchemaIssue[] }> {
+  const config = validateNotionConfig(value);
+  const { issues } = await verifyNotionSchema(config, transport);
+  const missing = issues.filter(issue => issue.problem === 'missing');
+  const unresolved = issues.filter(issue => issue.problem !== 'missing');
+  if (!missing.length) return { added: [], unresolved };
+  // Notion crea una columna con `{ <tipo>: {} }`; las opciones de un select se pueblan solas.
+  const properties = Object.fromEntries(missing.map(issue => [issue.property, { [issue.expected]: {} }]));
+  const response = await transport(request(config, 'PATCH', `${config.dataSourceId ? 'data_sources' : 'databases'}/${config.dataSourceId ?? config.databaseId}`, { properties }));
+  if (response.status !== 200) throw new Error('notion_schema_update_failed');
+  return { added: missing.map(issue => issue.property), unresolved };
+}
 function request(config: NotionConfig, method: HttpRequest['method'], path: string, body: Record<string, unknown>): HttpRequest {
   return { method, url: `https://api.notion.com/v1/${path}`, headers: { 'Content-Type': 'application/json', 'Notion-Version': config.dataSourceId ? '2025-09-03' : '2022-06-28' }, body };
 }
@@ -195,7 +216,10 @@ export async function upsertNotionRecords(records: readonly NotionRecord[], valu
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 60_000)) throw new Error('timeoutMs inválido');
   if (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 0)) throw new Error('limit inválido');
   const pacingMs = options.pacingMs ?? DEFAULT_PACING_MS;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms).unref?.(); }));
+  // SIN `unref()`: un temporizador desreferenciado no mantiene vivo el event loop, así que el
+  // proceso se cierra en mitad de la pausa y el lote queda a medio escribir. Aquí la espera ES
+  // el trabajo, no una tarea de fondo.
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); }));
   const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, records: [] };
   const seen = new Set<string>();
   let attempted = 0;

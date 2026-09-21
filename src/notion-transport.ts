@@ -11,7 +11,8 @@ export function createNotionTransport(fetcher: typeof fetch = fetch, env: NodeJS
     // verificar el esquema por mucho que se le pida.
     const writePath = /^\/v1\/(?:pages(?:\/[a-f\d-]+)?|(?:data_sources|databases)\/[a-f\d-]+\/query)$/i.test(url.pathname);
     const readPath = /^\/v1\/(?:data_sources|databases)\/[a-f\d-]+$/i.test(url.pathname);
-    const allowed = writePath ? ['POST', 'PATCH'] : readPath ? ['GET'] : [];
+    // La ruta de la data source admite leer el esquema (GET) y añadirle columnas (PATCH).
+    const allowed = writePath ? ['POST', 'PATCH'] : readPath ? ['GET', 'PATCH'] : [];
     if (url.origin !== 'https://api.notion.com' || url.username || url.password || url.search || url.hash
       || !allowed.includes(request.method)) throw new Error('notion_request_rejected');
     try {

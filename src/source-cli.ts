@@ -9,7 +9,7 @@ import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts
 import { parseRegistry } from './source-registry.ts';
 import { runSourceCycle, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
-import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
+import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
 import type { Provenance } from './source-adapters.ts';
 import { fetchRegister, registerIndex, type SponsorRegister } from './uk-sponsors.ts';
@@ -219,6 +219,7 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       + 'bin/offers --health                          quorum de fuentes del ultimo ciclo\n'
       + 'bin/offers --refresh-sponsors                registro britanico de patrocinadores\n'
       + 'bin/offers --verify-schema                   compara la base Notion con lo que se enviaria\n'
+      + 'bin/offers --apply-schema                    crea SOLO las columnas que faltan (nunca cambia tipos)\n'
       + 'bin/offers --sync [--limit N]                escribe en Notion (exige esquema verificado)\n\n'
       + 'El secreto NOTION_API_KEY se carga desde ~/.config/offers/env (chmod 600) via bin/offers.\n'
       + '--sync comprueba el esquema REAL contra la base antes de escribir y pausa entre registros\n'
@@ -258,6 +259,20 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       // Se imprime QUÉ falta y de qué tipo: "el esquema no coincide" no le sirve a nadie.
       console.log(JSON.stringify(schema, null, 2));
       return schema.ok ? 0 : 8;
+    } catch (error) {
+      const { code, hint } = notionFailure(error);
+      console.error(hint ? `${code}\n${hint}` : code);
+      return 4;
+    }
+  }
+  if (args.length === 1 && args[0] === '--apply-schema') {
+    try {
+      const local = await optionalJson(join(root, 'data/notion-local.json')) as { config?: unknown } | undefined;
+      if (!local?.config) { console.error('notion_sync_disabled'); return 5; }
+      const result = await applyNotionSchema(local.config, createNotionTransport());
+      console.log(JSON.stringify(result, null, 2));
+      // Un tipo equivocado NO se corrige solo: cambiarlo puede vaciar la columna en Notion.
+      return result.unresolved.length ? 8 : 0;
     } catch (error) {
       const { code, hint } = notionFailure(error);
       console.error(hint ? `${code}\n${hint}` : code);
