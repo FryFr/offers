@@ -236,11 +236,27 @@ mkdir -p ~/.config/offers && touch ~/.config/offers/env && chmod 600 ~/.config/o
 
 ### Sincronización con Notion
 
+```sh
+bin/offers --verify-schema    # ¿qué falta o tiene otro tipo?
+bin/offers --apply-schema     # crea SOLO lo que falta
+bin/offers --sync --limit 5   # primera escritura, acotada
+```
+
+`--apply-schema` es aditivo e idempotente. **Nunca cambia el tipo de una columna existente**: hacerlo puede vaciar lo que contiene en Notion, y esa es una decisión de una persona mirando sus datos, no de un script. Esos conflictos se reportan y se quedan como están.
+
 Tres protecciones, en este orden:
 
 1. **`--verify-schema` consulta el esquema REAL de la base** y lo compara con lo que este módulo envía, nombre por nombre y tipo por tipo. `schemaVerified: true` en un JSON es una afirmación del operador, no una verificación. Añadir una propiedad al código sin crearla en Notion hace que **cada** upsert devuelva 400 y `failed` iguale al total; fallar aquí cuesta una petición, fallar después cuesta cientos y deja la base a medio escribir. `--sync` ejecuta esta comprobación por su cuenta y aborta con código 8 si algo no coincide, listando qué falta.
 2. **`--limit N` acota el lote.** Los registros que sobran se reportan como `batch_limit`, no desaparecen. Úsalo en la primera corrida.
 3. **Pausa entre registros.** Notion limita a ~3 peticiones por segundo y cada registro hace dos (consultar y escribir). Sin ritmo, un lote de cientos se convierte en una tanda de 429 y escrituras a medias.
+
+La sincronización es **idempotente**: una segunda corrida sin cambios reporta `unchanged`, no `updated`. Para que eso sea cierto, la propiedad `Explanation` omite `evaluatedAt` y `verification.validUntil` — son sellos del ciclo que la produjo, no de la vacante, y cambian en cada ejecución. Incluirlos hacía que toda página se reescribiera cada hora. Notion ya registra cuándo se editó cada página.
+
+### Duración del ciclo y locks
+
+El ciclo tarda entre 45 s y varios minutos: además de leer las 20 fuentes, captura evidencia HTML de hasta 40 ofertas que pasaron el filtro de relevancia, cada una con su propio timeout. Mientras corre mantiene un lock exclusivo, así que un `--sync` simultáneo responde `source_lock_busy` — eso es la protección funcionando, no un error.
+
+Un lock que sobreviva a una caída **nunca se roba automáticamente**: se lee el PID que registra, se comprueba que ningún proceso lo esté usando (`kill -0`) y solo entonces se retira a mano.
 
 `--digest` escribe `data/digest/YYYY-MM-DD.md` con exactamente `relevance.dailyTarget` oportunidades. Cada una explica por qué está ahí: rol coincidente, habilidades encontradas en el texto, pago (o que la fuente no lo publica), modalidad, patrocinio con su cita, y antigüedad. **Si no hay nada que supere el umbral, el digest lo dice** en vez de rellenar con lo que no encaja: entregar ruido entrena a hojear el informe en vez de leerlo.
 
