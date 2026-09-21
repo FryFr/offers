@@ -190,8 +190,14 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
     const schema = await verifyNotionSchema(config, transport);
     if (!schema.ok) throw new SchemaMismatch(schema.issues);
     const result = await upsertNotionRecords(records, config, transport, { now: () => now, ...(options.limit !== undefined ? { limit: options.limit } : {}) });
+    // Los fallos se guardan con su motivo y su clave. Un conteo suelto ("failed: 2") deja sin
+    // forma de saber QUÉ falló ni de volver a esos registros: hay que recorrer 5.000 otra vez
+    // para averiguarlo. Se acotan para que un fallo masivo no infle el archivo.
+    const failures = result.records.filter(record => record.status === 'failed').slice(0, 50)
+      .map(record => ({ index: record.index, reason: record.reason ?? 'unknown', externalKey: records[record.index]?.externalKey }));
     const summary = { version: 1 as const, generatedAt: now.toISOString(),
-      counts: { created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, total: result.records.length } };
+      counts: { created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, total: result.records.length },
+      ...(failures.length ? { failures } : {}) };
     await atomicMailWrite(join(data, 'notion-sync.json'), summary);
     return summary;
   }));

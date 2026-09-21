@@ -407,6 +407,19 @@ test('--sync reads the existing checkpoint store and writes through the existing
     assert.equal(result.counts.created, 1); assert.equal(result.counts.failed, 0); assert.equal(writes, 1);
     const saved = JSON.parse(await readFile(join(root, 'data/notion-sync.json'), 'utf8'));
     assert.deepEqual(saved.counts, result.counts);
+    assert.equal('failures' in saved, false, 'sin fallos no se escribe la clave');
+    // Un fallo se guarda con su motivo y su clave: "failed: 2" a secas no permite volver a ellos.
+    const rompiendo: HttpTransport = async request => {
+      if (request.method === 'GET') return { status: 200, body: { object: 'data_source', properties: notionSchema() } };
+      if (request.url.endsWith('/query')) return { status: 500, body: null };
+      return { status: 200, body: { object: 'page', id: 'fixture-page' } };
+    };
+    await runNotionSync({ root, now, dependencies: { transport: rompiendo } });
+    const conFallos = JSON.parse(await readFile(join(root, 'data/notion-sync.json'), 'utf8'));
+    assert.equal(conFallos.counts.failed, 1);
+    assert.equal(conFallos.failures.length, 1);
+    assert.ok(conFallos.failures[0].reason, 'el motivo queda registrado');
+    assert.match(conFallos.failures[0].externalKey, /^[a-f\d]{64}$/);
     const disk = JSON.parse(await readFile(join(root, 'data/source-cycle.json'), 'utf8'));
     assert.deepEqual(disk.store, cycle.store);
   } finally { await rm(root, { recursive: true, force: true }); }
