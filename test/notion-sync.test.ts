@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { report, ingest } from '../src/pipeline.ts';
 import { parseAvailability, parseProfile } from '../src/contracts.ts';
-import { validateNotionConfig, planNotionSync as planSync, queryExistingPages, upsertNotionRecords as upsertSync, type HttpTransport, type HttpRequest } from '../src/notion-sync.ts';
+import { validateNotionConfig, planNotionSync as planSync, queryExistingPages, upsertNotionRecords as upsertSync, verifyNotionSchema, DEFAULT_PACING_MS, type HttpTransport, type HttpRequest } from '../src/notion-sync.ts';
 const config = { enabled: true, dataSourceId: '12345678-1234-1234-1234-123456789012', externalKeyProperty: 'External key' };
 const now = new Date('2026-09-16T12:00:00Z');
 const evidence = { url: 'https://example.com/job', publishedAt: '2026-09-16', publicationEvidence: { url: 'https://example.com/job', excerpt: 'Published 2026-09-16', observedAt: now.toISOString() }, availability: { url: 'https://example.com/job', checkedAt: now.toISOString(), outcome: 'open' as const, httpStatus: 200, evidence: 'Active application form for this job' } };
@@ -165,6 +165,50 @@ test('CLI Notion: dry-run local, flags explícitos y configuración sin reflejar
     assert.equal(bad.status, 1);
     assert.ok(!(bad.stdout + bad.stderr).includes('fake-secret-never-output'));
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('el esquema se comprueba contra la base y dice QUÉ falta', async () => {
+  const schema = {
+    Name: { type: 'title' }, Company: { type: 'rich_text' }, URL: { type: 'url' }, Type: { type: 'select' },
+    Expiration: { type: 'select' }, Deadline: { type: 'date' }, Verification: { type: 'select' },
+    'Verification reasons': { type: 'rich_text' }, Published: { type: 'date' }, Screening: { type: 'select' },
+    'Screening reasons': { type: 'rich_text' }, 'Employment eligibility': { type: 'select' },
+    Location: { type: 'rich_text' }, Relocation: { type: 'select' }, 'Recommendation rank': { type: 'number' },
+    'Recommendation priority': { type: 'number' }, Relevance: { type: 'number' }, 'Relevance tier': { type: 'select' },
+    'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
+    'Freelance review': { type: 'select' }, 'External key': { type: 'rich_text' },
+  } as Record<string, { type: string }>;
+  const withSchema = (properties: Record<string, { type: string }>): HttpTransport => async () => ({ status: 200, body: { object: 'list', results: [], data_source: { properties } } });
+  assert.deepEqual(await verifyNotionSchema(config, withSchema(schema)), { ok: true, issues: [] });
+  // Añadir un nombre al código sin crearlo en Notion hace que CADA upsert devuelva 400: por eso
+  // la comprobación nombra la propiedad exacta en vez de decir "algo no coincide".
+  const { Relevance: _omitted, ...sinRelevance } = schema;
+  const faltante = await verifyNotionSchema(config, withSchema(sinRelevance));
+  assert.equal(faltante.ok, false);
+  assert.deepEqual(faltante.issues, [{ property: 'Relevance', problem: 'missing', expected: 'number' }]);
+  const malTipo = await verifyNotionSchema(config, withSchema({ ...schema, 'Relevance tier': { type: 'rich_text' } }));
+  assert.deepEqual(malTipo.issues, [{ property: 'Relevance tier', problem: 'wrong_type', expected: 'select', found: 'rich_text' }]);
+  // Sin esquema en la respuesta no se puede afirmar nada: se falla en vez de suponer que está bien.
+  await assert.rejects(verifyNotionSchema(config, async () => ({ status: 200, body: { object: 'list', results: [] } })), /notion_schema_unreadable/);
+  await assert.rejects(verifyNotionSchema(config, async () => ({ status: 404, body: null })), /notion_schema_unreadable/);
+});
+
+test('el lote se acota y se pausa entre registros para respetar el límite de Notion', async () => {
+  // Registros reales: la clave externa es el hash de la oportunidad, así que fabricarla a mano
+  // haría fallar el gate por identidad antes de llegar al tope.
+  const many = report(ingest({ version: 1, records: [] }, Array.from({ length: 5 }, (_, i) =>
+    ({ ...evidence, source: 'test', externalId: `pacing-${i}`, title: 'Developer', company: 'Acme' }))), parseProfile({}), now).notion.records;
+  assert.equal(many.length, 5);
+  const waits: number[] = [];
+  let calls = 0;
+  const transport: HttpTransport = async req => { calls++; return req.url.endsWith('/query') ? list() : { status: 200, body: { object: 'page', id: 'ok' } }; };
+  const result = await upsertNotionRecords(many, config, transport, { limit: 2, sleep: async ms => { waits.push(ms); } });
+  // Los que sobran se REPORTAN, no desaparecen: hay que poder ver cuántos quedaron fuera.
+  assert.equal(result.records.filter(r => r.reason === 'batch_limit').length, 3);
+  assert.equal(calls, 4, 'solo los dos primeros llegan a Notion');
+  assert.deepEqual(waits, [DEFAULT_PACING_MS], 'una pausa entre registros, ninguna antes del primero');
+  // Es async: un límite inválido rechaza la promesa, no lanza sincrónicamente.
+  await assert.rejects(upsertNotionRecords(many, config, transport, { limit: -1 }), /limit inválido/);
 });
 
 test('Notion: ventana de publicación y evidencia ausente; bloqueados hacen cero llamadas incluso a query', async () => {

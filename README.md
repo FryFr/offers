@@ -215,14 +215,32 @@ SHA-256 de la primera identidad disponible: `(source, externalId)`; de lo contra
 - `Compensation.period` admite `hour|day|week|month|year|project`. La normalización vive en **un solo lugar** (`src/compensation.ts`): antes estaba duplicada con dos matemáticas divergentes entre `screening` y `evaluate`.
 - `src/fx.ts` convierte monedas con una tabla **estática, versionada y fechada**. No es cotización y cada cifra derivada lo dice. Una prueba falla cuando la tabla supera los 180 días, para que la refresque una persona. Una moneda fuera de la tabla no se estima: se deja sin evaluar.
 
-### Corte diario y entrega
+### Ejecución y secretos
 
 ```sh
-npm run sources -- --dry-run          # recolecta y persiste el checkpoint (horario)
-npm run sources -- --digest           # entrega el corte del día (lectura; no toca la red)
-npm run sources -- --refresh-sponsors # registro británico de patrocinadores (semanal)
-npm run sources -- --health
+bin/offers --dry-run          # recolecta y persiste el checkpoint (horario)
+bin/offers --digest           # entrega el corte del día (lectura; no toca la red)
+bin/offers --refresh-sponsors # registro británico de patrocinadores (semanal)
+bin/offers --health
+bin/offers --verify-schema    # compara la base de Notion con lo que se enviaría
+bin/offers --sync --limit 5   # escribe en Notion
 ```
+
+`bin/offers` carga los secretos desde **`~/.config/offers/env`** y rechaza el archivo si no tiene permisos `600`. Existe porque launchd **no arranca un shell de login**: ni `~/.zshrc` ni `~/.zprofile` se leen, así que una variable exportada en tu terminal nunca llega al agente. El archivo vive fuera del repositorio; el plist versionado no contiene secretos.
+
+```sh
+mkdir -p ~/.config/offers && touch ~/.config/offers/env && chmod 600 ~/.config/offers/env
+# dentro, una línea por secreto:
+# NOTION_API_KEY=...
+```
+
+### Sincronización con Notion
+
+Tres protecciones, en este orden:
+
+1. **`--verify-schema` consulta el esquema REAL de la base** y lo compara con lo que este módulo envía, nombre por nombre y tipo por tipo. `schemaVerified: true` en un JSON es una afirmación del operador, no una verificación. Añadir una propiedad al código sin crearla en Notion hace que **cada** upsert devuelva 400 y `failed` iguale al total; fallar aquí cuesta una petición, fallar después cuesta cientos y deja la base a medio escribir. `--sync` ejecuta esta comprobación por su cuenta y aborta con código 8 si algo no coincide, listando qué falta.
+2. **`--limit N` acota el lote.** Los registros que sobran se reportan como `batch_limit`, no desaparecen. Úsalo en la primera corrida.
+3. **Pausa entre registros.** Notion limita a ~3 peticiones por segundo y cada registro hace dos (consultar y escribir). Sin ritmo, un lote de cientos se convierte en una tanda de 429 y escrituras a medias.
 
 `--digest` escribe `data/digest/YYYY-MM-DD.md` con exactamente `relevance.dailyTarget` oportunidades. Cada una explica por qué está ahí: rol coincidente, habilidades encontradas en el texto, pago (o que la fuente no lo publica), modalidad, patrocinio con su cita, y antigüedad. **Si no hay nada que supere el umbral, el digest lo dice** en vez de rellenar con lo que no encaja: entregar ruido entrena a hojear el informe en vez de leerlo.
 

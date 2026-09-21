@@ -19,6 +19,17 @@ const source = (adapter: Source['adapter'], extra = {}): Source => parseRegistry
   ...(adapter === 'rss' ? { endpoint: 'https://weworkremotely.com/remote-jobs.rss' } : {}), ...extra }] })[0]!;
 const resolver = async () => ['93.184.216.34'];
 const response = (body: string) => ({ status: 200, headers: { 'content-type': 'application/json' }, body });
+/** Esquema mínimo que `verifyNotionSchema` debe encontrar en la base para permitir escribir. */
+const notionSchema = (overrides: Record<string, { type: string }> = {}) => ({
+  Name: { type: 'title' }, Company: { type: 'rich_text' }, URL: { type: 'url' }, Type: { type: 'select' },
+  Expiration: { type: 'select' }, Deadline: { type: 'date' }, Verification: { type: 'select' },
+  'Verification reasons': { type: 'rich_text' }, Published: { type: 'date' }, Screening: { type: 'select' },
+  'Screening reasons': { type: 'rich_text' }, 'Employment eligibility': { type: 'select' },
+  Location: { type: 'rich_text' }, Relocation: { type: 'select' }, 'Recommendation rank': { type: 'number' },
+  'Recommendation priority': { type: 'number' }, Relevance: { type: 'number' }, 'Relevance tier': { type: 'select' },
+  'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
+  'Freelance review': { type: 'select' }, 'External key': { type: 'rich_text' }, ...overrides,
+});
 
 test('registry rejects embedded secrets, duplicate IDs, unknown options, unsafe endpoints and too-fast cadence', () => {
   for (const extra of [{ secret: 'bad' }, { endpoint: 'https://evil.test' }, { enabled: 'yes' }, { minIntervalMinutes: 1 }, { secretEnv: 'NOTION_API_KEY' }]) assert.throws(() => source('remotive', extra));
@@ -382,8 +393,13 @@ test('--sync reads the existing checkpoint store and writes through the existing
     await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify(checkpoint));
     await writeFile(join(root, 'data/notion-local.json'), JSON.stringify({ schemaVerified: true, config: { ...config, enabled: true } }));
     let stored: Record<string, unknown> | undefined; let writes = 0;
+    // El sync ahora COMPRUEBA el esquema antes de escribir, así que el transporte falso tiene que
+    // devolverlo. Es justo la protección que faltaba: sin ella, cada upsert devolvía 400.
     const transport: HttpTransport = async request => {
-      if (request.url.endsWith('/query')) return { status: 200, body: { object: 'list', has_more: false, results: stored ? [{ object: 'page', id: 'fixture-page', properties: stored }] : [] } };
+      if (request.url.endsWith('/query')) {
+        return { status: 200, body: { object: 'list', has_more: false, data_source: { properties: notionSchema() },
+          results: stored ? [{ object: 'page', id: 'fixture-page', properties: stored }] : [] } };
+      }
       stored = request.body.properties as Record<string, unknown>; writes++; return { status: 200, body: { object: 'page', id: 'fixture-page' } };
     };
     const result = await runNotionSync({ root, now, dependencies: { transport } });

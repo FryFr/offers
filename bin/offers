@@ -1,0 +1,32 @@
+#!/bin/sh
+# Envoltorio para ejecutar el CLI con los secretos cargados.
+#
+# Existe porque launchd NO arranca un shell de login: ni ~/.zshrc ni ~/.zprofile se leen, así que
+# una variable exportada en tu terminal no llega al agente. Y porque un secreto no puede vivir en
+# el repositorio ni en el plist versionado.
+#
+# El archivo de entorno se guarda FUERA del repositorio con permisos 600:
+#
+#   mkdir -p ~/.config/offers && touch ~/.config/offers/env && chmod 600 ~/.config/offers/env
+#   # y dentro, una línea por secreto:
+#   NOTION_API_KEY=...
+#
+# Uso: bin/offers --dry-run | --digest | --sync | --health | --refresh-sponsors
+set -eu
+
+ENV_FILE="${OFFERS_ENV_FILE:-$HOME/.config/offers/env}"
+if [ -f "$ENV_FILE" ]; then
+  # Se rechaza un archivo de secretos legible por otros: es un error de configuración, no un detalle.
+  PERMS=$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE" 2>/dev/null || echo '600')
+  case "$PERMS" in
+    600|400) ;;
+    *) echo "offers: $ENV_FILE tiene permisos $PERMS; usa chmod 600" >&2; exit 2 ;;
+  esac
+  set -a
+  . "$ENV_FILE"
+  set +a
+fi
+
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+NODE="${OFFERS_NODE:-$HOME/.local/bin/node}"
+exec "$NODE" "$REPO/src/source-cli.ts" "$@"

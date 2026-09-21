@@ -9,7 +9,7 @@ import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts
 import { parseRegistry } from './source-registry.ts';
 import { runSourceCycle, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
-import { upsertNotionRecords, validateNotionConfig, type HttpTransport } from './notion-sync.ts';
+import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
 import type { Provenance } from './source-adapters.ts';
 import { fetchRegister, registerIndex, type SponsorRegister } from './uk-sponsors.ts';
@@ -163,7 +163,12 @@ export async function sourceHealth(root = repositoryRoot, now = new Date()) {
   return { healthy, ...(healthy ? {} : { reason: 'checkpoint_degraded' as HealthReason }), mode: 'dry-run', confirmed: false, generatedAt: checkpoint.generatedAt, counts: checkpoint.counts, quorum };
 }
 /** Reads the existing checkpoint store/profile and the existing writer only; never recollects sources or revalidates cadence. */
-export async function runNotionSync(options: { root?: string; now?: Date; dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
+/** Lleva la lista de diferencias para que el CLI pueda decir QUÉ falta, no solo que algo falla. */
+export class SchemaMismatch extends Error {
+  issues: SchemaIssue[];
+  constructor(issues: SchemaIssue[]) { super('notion_schema_mismatch'); this.issues = issues; }
+}
+export async function runNotionSync(options: { root?: string; now?: Date; limit?: number; dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
   const root = options.root ?? repositoryRoot, data = join(root, 'data');
   await mkdir(data, { recursive: true, mode: 0o700 });
   return withMailLock(join(data, 'automation'), () => withMailLock(join(data, 'source-cycle.json'), async () => {
@@ -179,7 +184,12 @@ export async function runNotionSync(options: { root?: string; now?: Date; depend
     const profile = parseProfile(await json(join(root, 'examples/profile.json')));
     const records = report(store, profile, now).notion.records;
     const transport = options.dependencies?.transport ?? createNotionTransport(fetch, options.dependencies?.env ?? process.env);
-    const result = await upsertNotionRecords(records, config, transport, { now: () => now });
+    // El esquema se COMPRUEBA contra la base, no se asume. Enviar una propiedad que no existe
+    // hace que cada upsert devuelva 400 y `failed` iguale al total: fallar aquí cuesta una
+    // petición, fallar después cuesta cientos y deja la base a medio escribir.
+    const schema = await verifyNotionSchema(config, transport);
+    if (!schema.ok) throw new SchemaMismatch(schema.issues);
+    const result = await upsertNotionRecords(records, config, transport, { now: () => now, ...(options.limit !== undefined ? { limit: options.limit } : {}) });
     const summary = { version: 1 as const, generatedAt: now.toISOString(),
       counts: { created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, total: result.records.length } };
     await atomicMailWrite(join(data, 'notion-sync.json'), summary);
@@ -188,9 +198,18 @@ export async function runNotionSync(options: { root?: string; now?: Date; depend
 }
 export async function sourcesMain(args: string[], root = repositoryRoot): Promise<number> {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('npm run sources -- --dry-run [--enrich-model MODEL]\nnpm run sources -- --health\nnpm run sources -- --sync\nnpm run sources -- --refresh-sponsors\n'
-      + 'Fixed repository config. --sync requires data/notion-local.json with schemaVerified:true and an enabled config, plus a fresh healthy checkpoint from --dry-run; it reads the existing store/profile without recollecting sources and writes only through the existing Notion transport (NOTION_API_KEY). Result counts are saved to data/notion-sync.json.\n'
-      + '--sync exits: 0 synced, 2 invalid arguments, 3 occupied lock, 4 sync failure, 5 sync disabled (unverified schema or disabled config), 6 stale/unhealthy checkpoint, 7 synced with failed records.');
+    console.log('bin/offers --dry-run [--enrich-model MODEL]   recolecta y persiste el checkpoint\n'
+      + 'bin/offers --digest                          entrega el corte del dia (solo lectura)\n'
+      + 'bin/offers --health                          quorum de fuentes del ultimo ciclo\n'
+      + 'bin/offers --refresh-sponsors                registro britanico de patrocinadores\n'
+      + 'bin/offers --verify-schema                   compara la base Notion con lo que se enviaria\n'
+      + 'bin/offers --sync [--limit N]                escribe en Notion (exige esquema verificado)\n\n'
+      + 'El secreto NOTION_API_KEY se carga desde ~/.config/offers/env (chmod 600) via bin/offers.\n'
+      + '--sync comprueba el esquema REAL contra la base antes de escribir y pausa entre registros\n'
+      + 'para respetar el limite de Notion. Usa --limit en la primera corrida.\n'
+      + '--sync exits: 0 sincronizado, 2 argumentos invalidos, 3 lock ocupado, 4 fallo de sync,\n'
+      + '5 sync deshabilitado, 6 checkpoint vencido, 7 sincronizado con registros fallidos,\n'
+      + '8 el esquema de Notion no coincide.');
     return 0;
   }
   if (args.length === 1 && args[0] === '--health') {
@@ -214,13 +233,28 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
     try { console.log(JSON.stringify(await refreshSponsors({ root }))); return 0; }
     catch (error) { console.error(error instanceof Error && ['register_page_unavailable', 'register_link_not_found', 'register_download_failed', 'register_header_unexpected', 'register_empty'].includes(error.message) ? error.message : 'sponsors_refresh_failed'); return 4; }
   }
-  if (args.length === 1 && args[0] === '--sync') {
+  if (args.length === 1 && args[0] === '--verify-schema') {
     try {
-      const result = await runNotionSync({ root });
+      const local = await optionalJson(join(root, 'data/notion-local.json')) as { config?: unknown } | undefined;
+      if (!local?.config) { console.error('notion_sync_disabled'); return 5; }
+      const transport = createNotionTransport();
+      const schema = await verifyNotionSchema(local.config, transport);
+      // Se imprime QUÉ falta y de qué tipo: "el esquema no coincide" no le sirve a nadie.
+      console.log(JSON.stringify(schema, null, 2));
+      return schema.ok ? 0 : 8;
+    } catch (error) { console.error(error instanceof Error && error.message === 'notion_schema_unreadable' ? 'notion_schema_unreadable' : 'notion_sync_failed'); return 4; }
+  }
+  if (args[0] === '--sync' && [1, 3].includes(args.length) && (args.length === 1 || (args[1] === '--limit' && /^\d+$/.test(args[2] ?? '')))) {
+    try {
+      const result = await runNotionSync({ root, ...(args.length === 3 ? { limit: Number(args[2]) } : {}) });
       console.log(JSON.stringify({ counts: result.counts }));
       return result.counts.failed > 0 ? 7 : 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : '';
+      if (error instanceof SchemaMismatch) {
+        console.error(`notion_schema_mismatch\n${JSON.stringify(error.issues, null, 2)}`);
+        return 8;
+      }
       if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
       if (message === 'notion_sync_disabled') { console.error('notion_sync_disabled'); return 5; }
       if (message === 'checkpoint_unhealthy') { console.error('checkpoint_unhealthy'); return 6; }

@@ -43,6 +43,46 @@ export function validateNotionConfig(value: unknown): NotionConfig {
   if (new Set([...names, v.externalKeyProperty]).size !== activeFields.length + 1) throw invalid();
   return { enabled: v.enabled === true, ...(v.dataSourceId ? { dataSourceId: v.dataSourceId as string } : { databaseId: v.databaseId as string }), externalKeyProperty: v.externalKeyProperty, includeCalculationContext: v.includeCalculationContext === true, propertyMap: { ...map } };
 }
+/**
+ * Tipo de propiedad Notion que exige cada campo de la proyección. Añadir un nombre a `fields` sin
+ * crearlo en la base hace que CADA upsert devuelva 400 y `failed` iguale al total, así que la
+ * comprobación tiene que ser real: `schemaVerified` en un JSON es una afirmación del operador,
+ * no una verificación.
+ */
+const EXPECTED_TYPES: Record<typeof fields[number], string> = {
+  Name: 'title', Company: 'rich_text', URL: 'url', Type: 'select', Expiration: 'select',
+  Deadline: 'date', Verification: 'select', 'Verification reasons': 'rich_text', Published: 'date',
+  Screening: 'select', 'Screening reasons': 'rich_text', 'Employment eligibility': 'select',
+  Location: 'rich_text', Relocation: 'select', 'Recommendation rank': 'number',
+  'Recommendation priority': 'number', Relevance: 'number', 'Relevance tier': 'select',
+  'Fit score': 'number', 'Economic score': 'number', 'Hourly USD': 'number',
+  'Freelance review': 'select', Origin: 'rich_text', 'Calculation assumptions': 'rich_text', Explanation: 'rich_text',
+};
+export interface SchemaIssue { property: string; problem: 'missing' | 'wrong_type'; expected: string; found?: string }
+/**
+ * Compara el esquema REAL de la base contra lo que este módulo envía. Devuelve la lista de
+ * diferencias; una lista vacía es la única evidencia aceptable para escribir.
+ */
+export async function verifyNotionSchema(value: unknown, transport: HttpTransport): Promise<{ ok: boolean; issues: SchemaIssue[] }> {
+  const config = validateNotionConfig(value);
+  // Se consulta con page_size 1: interesa el esquema que acompaña a la respuesta, no las filas.
+  const response = await transport(request(config, 'POST', `${config.dataSourceId ? 'data_sources' : 'databases'}/${config.dataSourceId ?? config.databaseId}/query`, { page_size: 1 }));
+  if (response.status !== 200) throw new Error('notion_schema_unreadable');
+  const body = obj(response.body);
+  const schema = obj(obj(body.data_source ?? body.database ?? {}).properties ?? body.properties ?? {});
+  // Notion no devuelve el esquema en toda respuesta de query; sin él no se puede afirmar nada.
+  if (!Object.keys(schema).length) throw new Error('notion_schema_unreadable');
+  const active = config.includeCalculationContext ? fields : fields.filter(k => !calculationContextFields.includes(k as typeof calculationContextFields[number]));
+  const issues: SchemaIssue[] = [];
+  for (const field of [...active, config.externalKeyProperty]) {
+    const name = active.includes(field as typeof fields[number]) ? config.propertyMap[field as typeof fields[number]] ?? field : field;
+    const expected = field === config.externalKeyProperty ? 'rich_text' : EXPECTED_TYPES[field as typeof fields[number]];
+    const found = schema[name] ? String(obj(schema[name]).type ?? '') : undefined;
+    if (!found) issues.push({ property: name, problem: 'missing', expected });
+    else if (found !== expected) issues.push({ property: name, problem: 'wrong_type', expected, found });
+  }
+  return { ok: !issues.length, issues };
+}
 function request(config: NotionConfig, method: HttpRequest['method'], path: string, body: Record<string, unknown>): HttpRequest {
   return { method, url: `https://api.notion.com/v1/${path}`, headers: { 'Content-Type': 'application/json', 'Notion-Version': config.dataSourceId ? '2025-09-03' : '2022-06-28' }, body };
 }
@@ -114,7 +154,19 @@ export interface SyncOptions {
   now?: () => Date;
   revalidate?: (opportunity: Opportunity, signal: AbortSignal) => Promise<AvailabilityEvidence>;
   timeoutMs?: number;
+  /** Tope de registros a procesar. Los que sobran se reportan `skipped`/`batch_limit`, no se pierden. */
+  limit?: number;
+  /** Pausa entre registros. Notion limita ~3 peticiones/segundo y cada registro hace dos. */
+  pacingMs?: number;
+  /** Seam de pruebas: evita esperas reales en la suite. */
+  sleep?: (ms: number) => Promise<void>;
 }
+/**
+ * Ritmo por defecto. Cada registro dispara una consulta y, si cambia, una escritura: a ~3
+ * peticiones por segundo del lado de Notion, 700 ms entre registros deja margen. Sin esto, un
+ * lote de cientos se convierte en una tanda de 429 y escrituras a medias.
+ */
+export const DEFAULT_PACING_MS = 700;
 async function revalidate(o: Opportunity, options: SyncOptions, now: () => Date): Promise<Opportunity> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -142,17 +194,26 @@ export async function upsertNotionRecords(records: readonly NotionRecord[], valu
   const config = validateNotionConfig(value);
   const now = options.now ?? (() => new Date());
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 60_000)) throw new Error('timeoutMs inválido');
+  if (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 0)) throw new Error('limit inválido');
+  const pacingMs = options.pacingMs ?? DEFAULT_PACING_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms).unref?.(); }));
   const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, records: [] };
   const seen = new Set<string>();
+  let attempted = 0;
   for (const [index, record] of records.entries()) {
     let status: SyncResult['records'][number]['status'] = 'skipped';
     let reason: string | undefined;
     let checked: Verification | undefined;
     let opportunity: Opportunity | undefined;
     if (!config.enabled) reason = 'sync_disabled';
+    // Pasado el tope, los registros restantes se reportan, no se descartan en silencio: hay que
+    // poder ver cuántos quedaron fuera y por qué.
+    else if (options.limit !== undefined && attempted >= options.limit) reason = 'batch_limit';
     else if (seen.has(record.externalKey)) reason = 'duplicate_in_batch';
     else try {
       seen.add(record.externalKey);
+      // El ritmo va antes de la petición y solo cuando de verdad se va a llamar a Notion.
+      if (attempted++ && pacingMs > 0) await sleep(pacingMs);
       await exclusively(`${config.dataSourceId ?? config.databaseId}:${record.externalKey}`, async () => {
         let candidate = structuredClone(record);
         checked = gate(candidate, now());
