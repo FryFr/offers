@@ -196,6 +196,22 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
     return summary;
   }));
 }
+/**
+ * Traduce un fallo de Notion a un motivo accionable. Un `notion_sync_failed` genérico obliga a
+ * adivinar entre "falta la llave", "la base no responde" y "la petición se rechazó": esconder la
+ * causa cuesta más tiempo que cualquier fallo.
+ */
+function notionFailure(error: unknown): { code: string; hint?: string } {
+  const message = error instanceof Error ? error.message : '';
+  if (message === 'notion_credentials_missing_or_invalid') {
+    return { code: message, hint: 'NOTION_API_KEY no está en el entorno. Ponla en ~/.config/offers/env (chmod 600) y ejecuta a través de bin/offers, no de node directamente.' };
+  }
+  if (message === 'notion_schema_unreadable') return { code: message, hint: 'La base respondió sin esquema o con error: revisa que la integración tenga acceso a esa data source.' };
+  if (message === 'notion_transport_error') return { code: message, hint: 'No se pudo hablar con api.notion.com (red o timeout de 15 s).' };
+  if (message === 'notion_request_rejected') return { code: message, hint: 'La URL o el método no pasaron la validación del transporte; revisa dataSourceId en data/notion-local.json.' };
+  if (message === 'Configuración Notion inválida') return { code: 'notion_config_invalid', hint: 'data/notion-local.json no cumple el contrato de NotionConfig.' };
+  return { code: 'notion_sync_failed' };
+}
 export async function sourcesMain(args: string[], root = repositoryRoot): Promise<number> {
   if (args.length === 1 && args[0] === '--help') {
     console.log('bin/offers --dry-run [--enrich-model MODEL]   recolecta y persiste el checkpoint\n'
@@ -242,7 +258,11 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       // Se imprime QUÉ falta y de qué tipo: "el esquema no coincide" no le sirve a nadie.
       console.log(JSON.stringify(schema, null, 2));
       return schema.ok ? 0 : 8;
-    } catch (error) { console.error(error instanceof Error && error.message === 'notion_schema_unreadable' ? 'notion_schema_unreadable' : 'notion_sync_failed'); return 4; }
+    } catch (error) {
+      const { code, hint } = notionFailure(error);
+      console.error(hint ? `${code}\n${hint}` : code);
+      return 4;
+    }
   }
   if (args[0] === '--sync' && [1, 3].includes(args.length) && (args.length === 1 || (args[1] === '--limit' && /^\d+$/.test(args[2] ?? '')))) {
     try {
@@ -258,7 +278,9 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
       if (message === 'notion_sync_disabled') { console.error('notion_sync_disabled'); return 5; }
       if (message === 'checkpoint_unhealthy') { console.error('checkpoint_unhealthy'); return 6; }
-      console.error('notion_sync_failed'); return 4;
+      const { code, hint } = notionFailure(error);
+      console.error(hint ? `${code}\n${hint}` : code);
+      return 4;
     }
   }
   if (args[0] !== '--dry-run' || ![1, 3].includes(args.length) || (args.length === 3 && (args[1] !== '--enrich-model' || !args[2]))) return 2;
