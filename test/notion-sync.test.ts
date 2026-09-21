@@ -261,6 +261,18 @@ test('el lote se acota y se pausa entre registros para respetar el límite de No
   assert.deepEqual(waits, [DEFAULT_PACING_MS], 'una pausa entre registros, ninguna antes del primero');
   // Es async: un límite inválido rechaza la promesa, no lanza sincrónicamente.
   await assert.rejects(upsertNotionRecords(many, config, transport, { limit: -1 }), /limit inválido/);
+
+  // La pausa solo aplica a los registros que DE VERDAD llaman a Notion. Medido en producción:
+  // 5.070 registros para ~780 llamadas; pausar en todos costaba 59 minutos de sueño para
+  // respetar un límite que solo afecta a quienes lo consumen.
+  const bloqueado = report(ingest({ version: 1, records: [] }, Array.from({ length: 8 }, (_, i) =>
+    ({ title: 'Developer', company: 'Acme', source: 'test', externalId: `sin-evidencia-${i}` }))), parseProfile({}), now).notion.records;
+  const mezcla = [...bloqueado, ...many.slice(0, 2)];
+  const esperas: number[] = [];
+  const resultado = await upsertNotionRecords(mezcla, config, transport, { sleep: async ms => { esperas.push(ms); } });
+  assert.equal(resultado.records.filter(r => r.reason === 'verification_blocked').length, 8);
+  assert.equal(resultado.created, 2);
+  assert.deepEqual(esperas, [DEFAULT_PACING_MS], 'una sola pausa: entre las dos que llamaron a Notion');
 });
 
 test('Notion: ventana de publicación y evidencia ausente; bloqueados hacen cero llamadas incluso a query', async () => {
