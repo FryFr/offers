@@ -396,8 +396,9 @@ test('--sync reads the existing checkpoint store and writes through the existing
     // El sync ahora COMPRUEBA el esquema antes de escribir, así que el transporte falso tiene que
     // devolverlo. Es justo la protección que faltaba: sin ella, cada upsert devolvía 400.
     const transport: HttpTransport = async request => {
+      if (request.method === 'GET') return { status: 200, body: { object: 'data_source', properties: notionSchema() } };
       if (request.url.endsWith('/query')) {
-        return { status: 200, body: { object: 'list', has_more: false, data_source: { properties: notionSchema() },
+        return { status: 200, body: { object: 'list', has_more: false,
           results: stored ? [{ object: 'page', id: 'fixture-page', properties: stored }] : [] } };
       }
       stored = request.body.properties as Record<string, unknown>; writes++; return { status: 200, body: { object: 'page', id: 'fixture-page' } };

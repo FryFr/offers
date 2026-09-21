@@ -178,7 +178,12 @@ test('el esquema se comprueba contra la base y dice QUÉ falta', async () => {
     'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
     'Freelance review': { type: 'select' }, 'External key': { type: 'rich_text' },
   } as Record<string, { type: string }>;
-  const withSchema = (properties: Record<string, { type: string }>): HttpTransport => async () => ({ status: 200, body: { object: 'list', results: [], data_source: { properties } } });
+  // El esquema se pide con GET a la data source; el endpoint de query devuelve filas, no columnas.
+  const withSchema = (properties: Record<string, { type: string }>): HttpTransport => async request => {
+    assert.equal(request.method, 'GET');
+    assert.ok(!request.url.endsWith('/query'), 'query devuelve filas, no el esquema');
+    return { status: 200, body: { object: 'data_source', properties } };
+  };
   assert.deepEqual(await verifyNotionSchema(config, withSchema(schema)), { ok: true, issues: [] });
   // Añadir un nombre al código sin crearlo en Notion hace que CADA upsert devuelva 400: por eso
   // la comprobación nombra la propiedad exacta en vez de decir "algo no coincide".
@@ -189,7 +194,7 @@ test('el esquema se comprueba contra la base y dice QUÉ falta', async () => {
   const malTipo = await verifyNotionSchema(config, withSchema({ ...schema, 'Relevance tier': { type: 'rich_text' } }));
   assert.deepEqual(malTipo.issues, [{ property: 'Relevance tier', problem: 'wrong_type', expected: 'select', found: 'rich_text' }]);
   // Sin esquema en la respuesta no se puede afirmar nada: se falla en vez de suponer que está bien.
-  await assert.rejects(verifyNotionSchema(config, async () => ({ status: 200, body: { object: 'list', results: [] } })), /notion_schema_unreadable/);
+  await assert.rejects(verifyNotionSchema(config, async () => ({ status: 200, body: { object: 'data_source' } })), /notion_schema_unreadable/);
   await assert.rejects(verifyNotionSchema(config, async () => ({ status: 404, body: null })), /notion_schema_unreadable/);
 });
 

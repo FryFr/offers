@@ -20,7 +20,7 @@ export interface NotionConfig {
   includeCalculationContext: boolean;
   propertyMap: Partial<Record<typeof fields[number], string>>;
 }
-export interface HttpRequest { method: 'POST' | 'PATCH'; url: string; headers: Record<string, string>; body: Record<string, unknown> }
+export interface HttpRequest { method: 'GET' | 'POST' | 'PATCH'; url: string; headers: Record<string, string>; body: Record<string, unknown> }
 export interface HttpResponse { status: number; body: unknown }
 /** Authentication belongs to the caller's transport; this module never reads credentials. */
 export type HttpTransport = (request: HttpRequest) => Promise<HttpResponse>;
@@ -65,12 +65,11 @@ export interface SchemaIssue { property: string; problem: 'missing' | 'wrong_typ
  */
 export async function verifyNotionSchema(value: unknown, transport: HttpTransport): Promise<{ ok: boolean; issues: SchemaIssue[] }> {
   const config = validateNotionConfig(value);
-  // Se consulta con page_size 1: interesa el esquema que acompaña a la respuesta, no las filas.
-  const response = await transport(request(config, 'POST', `${config.dataSourceId ? 'data_sources' : 'databases'}/${config.dataSourceId ?? config.databaseId}/query`, { page_size: 1 }));
+  // GET sobre la data source, no query: el endpoint de query devuelve las FILAS de la base, no
+  // sus columnas. Pedirle el esquema a query devuelve siempre vacío.
+  const response = await transport(request(config, 'GET', `${config.dataSourceId ? 'data_sources' : 'databases'}/${config.dataSourceId ?? config.databaseId}`, {}));
   if (response.status !== 200) throw new Error('notion_schema_unreadable');
-  const body = obj(response.body);
-  const schema = obj(obj(body.data_source ?? body.database ?? {}).properties ?? body.properties ?? {});
-  // Notion no devuelve el esquema en toda respuesta de query; sin él no se puede afirmar nada.
+  const schema = obj(obj(response.body).properties ?? {});
   if (!Object.keys(schema).length) throw new Error('notion_schema_unreadable');
   const active = config.includeCalculationContext ? fields : fields.filter(k => !calculationContextFields.includes(k as typeof calculationContextFields[number]));
   const issues: SchemaIssue[] = [];
