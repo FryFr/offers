@@ -1,22 +1,154 @@
 {
   "skills": [
+    "llm",
+    "rag",
+    "automation",
+    "python",
     "typescript",
     "javascript",
-    "node.js",
-    "react",
-    "next.js",
-    "golang",
-    "python",
+    "rest api",
+    "etl",
     "postgresql",
     "docker",
-    "kubernetes",
-    "aws",
-    "terraform",
-    "graphql",
-    "rest api",
-    "microservices",
     "ci/cd",
     "testing"
+  ],
+  "secondarySkills": [
+    "n8n",
+    "mcp",
+    "prompt engineering",
+    "webhooks",
+    "node.js",
+    "java",
+    "spring boot",
+    "fastapi",
+    "langchain",
+    "llamaindex",
+    "langgraph",
+    "crewai",
+    "autogen",
+    "weaviate",
+    "qdrant",
+    "chroma",
+    "pgvector",
+    "milvus",
+    "langsmith",
+    "langfuse",
+    "guardrails",
+    "fine-tuning",
+    "hugging face",
+    "transformers",
+    "ollama",
+    "vllm",
+    "make.com",
+    "zapier",
+    "workato",
+    "power automate",
+    "salesforce",
+    "twilio",
+    "stripe",
+    "notion api",
+    "airtable",
+    "uipath",
+    "selenium",
+    "playwright",
+    "airflow",
+    "dagster",
+    "prefect",
+    "celery",
+    "kafka",
+    "rabbitmq",
+    "redis",
+    "snowflake",
+    "bigquery",
+    "databricks",
+    "dbt",
+    "elasticsearch",
+    "clickhouse",
+    "prometheus",
+    "grafana",
+    "sentry",
+    "ansible",
+    "nginx",
+    "serverless",
+    "cloudflare workers",
+    "vercel",
+    "railway",
+    "fly.io",
+    "render.com",
+    "django",
+    "flask",
+    "pandas",
+    "numpy",
+    "pydantic",
+    "sqlalchemy",
+    "nestjs",
+    "express.js",
+    "trpc",
+    "prisma",
+    "bun",
+    "deno",
+    "vue",
+    "angular",
+    "svelte",
+    "tailwind",
+    "flutter",
+    "react native",
+    "ros2",
+    "moveit",
+    "nav2",
+    "slam",
+    "opencv",
+    "yolo",
+    "point cloud",
+    "plc",
+    "scada",
+    "modbus",
+    "universal robots",
+    "solidworks",
+    "isaac sim",
+    "gazebo",
+    "simulink",
+    "people management",
+    "technical hiring",
+    "mentoring",
+    "performance reviews",
+    "scrum",
+    "kanban",
+    "jira",
+    "okr",
+    "sprint planning",
+    "project management",
+    "change management",
+    "continuous improvement",
+    "presales",
+    "requirements gathering",
+    "roadmap",
+    "account management",
+    "react",
+    "next.js",
+    "websockets",
+    "sql server",
+    "supabase",
+    "firebase",
+    "odoo",
+    "hubspot",
+    "linux",
+    "gcp",
+    "azure",
+    "aws",
+    "c++",
+    "sql",
+    "dart",
+    "matlab",
+    "ros",
+    "esp32",
+    "arduino",
+    "kubernetes",
+    "terraform",
+    "golang",
+    "graphql",
+    "microservices"
   ],
   "preferredKinds": [
     "freelance",
@@ -36,46 +168,84 @@
   ],
   "excludedIndustries": [],
   "relevance": {
-    "dailyTarget": 10,
-    "roleTerms": [
-      "software engineer",
-      "software developer",
-      "backend engineer",
-      "backend developer",
-      "frontend engineer",
-      "frontend developer",
-      "full stack engineer",
-      "full stack developer",
-      "fullstack engineer",
-      "fullstack developer",
-      "platform engineer",
-      "infrastructure engineer",
-      "devops engineer",
-      "site reliability engineer",
-      "sre",
-      "cloud engineer",
-      "software architect",
-      "solutions architect",
-      "engineering manager",
-      "tech lead",
-      "technical lead",
-      "staff engineer",
-      "principal engineer",
-      "developer",
-      "engineer",
-      "programmer",
-      "node js developer",
-      "typescript developer",
-      "react developer",
-      "api engineer",
-      "systems engineer",
-      "automation engineer",
-      "ai engineer",
-      "machine learning engineer",
-      "data engineer",
-      "consultant",
-      "contractor"
-    ],
+    "dailyTarget": 15,
+    "roleTerms": {
+      "ai_automation": [
+        "ai automation engineer",
+        "ai integration engineer",
+        "ai engineer",
+        "applied ai engineer",
+        "llm engineer",
+        "genai engineer",
+        "generative ai engineer",
+        "agent engineer",
+        "ai solutions engineer",
+        "machine learning engineer",
+        "integration engineer",
+        "solutions engineer",
+        "forward deployed engineer",
+        "automation engineer",
+        "automation specialist",
+        "automation developer",
+        "workflow automation engineer",
+        "rpa developer",
+        "n8n developer",
+        "backend engineer",
+        "backend developer",
+        "software engineer",
+        "software developer",
+        "full stack engineer",
+        "full stack developer",
+        "fullstack engineer",
+        "fullstack developer",
+        "platform engineer",
+        "api engineer",
+        "data engineer",
+        "ai consultant",
+        "automation consultant",
+        "integration consultant",
+        "technical consultant",
+        "software consultant",
+        "ai application engineer",
+        "ai platform engineer",
+        "ai infrastructure engineer",
+        "mlops engineer",
+        "llmops engineer",
+        "devops engineer",
+        "infrastructure engineer",
+        "cloud engineer",
+        "site reliability engineer",
+        "devops",
+        "mlops",
+        "llmops"
+      ],
+      "robotics": [
+        "robotics engineer",
+        "robotics software engineer",
+        "mechatronics engineer",
+        "control engineer",
+        "controls engineer",
+        "embedded engineer",
+        "embedded software engineer",
+        "firmware engineer",
+        "perception engineer",
+        "motion planning engineer",
+        "autonomy engineer"
+      ],
+      "management": [
+        "engineering manager",
+        "tech lead",
+        "technical lead",
+        "team lead",
+        "head of engineering",
+        "director of engineering",
+        "engineering director",
+        "vp engineering",
+        "staff engineer",
+        "principal engineer",
+        "technical account manager"
+      ]
+    },
     "roleExcludedTerms": [
       "account executive",
       "sales",
@@ -139,7 +309,6 @@
       "manufacturing",
       "aerospace",
       "biomedical",
-      "hardware engineer",
       "field engineer",
       "compliance engineer",
       "process engineer",
@@ -154,16 +323,60 @@
       "animator",
       "editor de video",
       "brand manager",
-      "brand designer"
+      "brand designer",
+      "recruitment"
     ],
     "skillAliases": {
+      "llm": [
+        "llms",
+        "large language model",
+        "large language models",
+        "genai",
+        "generative ai",
+        "openai",
+        "anthropic",
+        "claude",
+        "gpt",
+        "chatgpt",
+        "gemini"
+      ],
+      "rag": [
+        "retrieval augmented generation",
+        "vector database",
+        "vector databases",
+        "vector search",
+        "embeddings",
+        "pinecone"
+      ],
+      "mcp": [
+        "model context protocol"
+      ],
+      "automation": [
+        "workflow automation",
+        "process automation",
+        "business process automation",
+        "rpa"
+      ],
+      "prompt engineering": [
+        "prompt design"
+      ],
+      "etl": [
+        "elt",
+        "data pipeline",
+        "data pipelines"
+      ],
+      "webhooks": [
+        "webhook"
+      ],
+      "spring boot": [
+        "springboot"
+      ],
+      "fastapi": [
+        "fast api"
+      ],
       "node.js": [
         "nodejs",
         "node js"
-      ],
-      "next.js": [
-        "nextjs",
-        "next js"
       ],
       "javascript": [
         "js",
@@ -173,23 +386,38 @@
         "postgres",
         "psql"
       ],
-      "kubernetes": [
-        "k8s"
+      "docker": [
+        "containerised",
+        "containerized",
+        "containers"
+      ],
+      "rest api": [
+        "restful",
+        "rest apis"
       ],
       "ci/cd": [
         "ci cd",
         "continuous integration",
         "continuous delivery",
-        "continuous deployment"
+        "continuous deployment",
+        "github actions"
       ],
-      "rest api": [
-        "restful"
+      "testing": [
+        "unit testing",
+        "test automation",
+        "tdd",
+        "pytest",
+        "vitest"
       ],
-      "aws": [
-        "amazon web services"
+      "kubernetes": [
+        "k8s"
       ],
       "golang": [
         "go lang"
+      ],
+      "next.js": [
+        "nextjs",
+        "next js"
       ],
       "react": [
         "react js",
@@ -198,10 +426,25 @@
       "graphql": [
         "apollo"
       ],
-      "testing": [
-        "unit testing",
-        "test automation",
-        "tdd"
+      "aws": [
+        "amazon web services"
+      ],
+      "ros2": [
+        "ros 2"
+      ],
+      "hugging face": [
+        "huggingface"
+      ],
+      "fine-tuning": [
+        "fine tuning",
+        "finetuning",
+        "lora"
+      ],
+      "make.com": [
+        "make com"
+      ],
+      "fly.io": [
+        "fly io"
       ]
     },
     "relocationTargets": [

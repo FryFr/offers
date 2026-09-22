@@ -143,8 +143,12 @@ test('el perfil real no usa alias que sean palabras corrientes en inglés', asyn
   // "next" (756 vs 100 de "next.js"), "api" (343) y "rest" (129, por "rest of the team").
   // Un alias corriente infla el puntaje de habilidades de un tercio del pool y corrompe el orden.
   const real = parseProfile(JSON.parse(await readFile(new URL('../examples/profile.json', import.meta.url), 'utf8')));
-  const variants = new Set([...real.skills, ...Object.values(real.relevance.skillAliases).flat()]);
-  for (const dangerous of ['go', 'next', 'api', 'rest', 'ts', 'ai', 'ml', 'it']) {
+  // La regla cubre las DOS listas. Una palabra corriente entre las secundarias infla el bono en
+  // medio pool exactamente igual que una entre las del núcleo infla el puntaje.
+  const variants = new Set([...real.skills, ...real.secondarySkills, ...Object.values(real.relevance.skillAliases).flat()]);
+  // `express` ("express interest", "express delivery") y `render` ("render services") entran por
+  // la misma puerta que `go` y `next`: se declaran como `express.js` y `render.com`.
+  for (const dangerous of ['go', 'next', 'api', 'rest', 'ts', 'ai', 'ml', 'it', 'express', 'render']) {
     assert.ok(!variants.has(dangerous), `"${dangerous}" es una palabra corriente: usar la forma inequívoca`);
   }
   // La forma inequívoca sí debe estar, o se perdería la señal por completo.
