@@ -15,7 +15,7 @@
       "company": "Stripe",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-anthropic",
@@ -24,7 +24,7 @@
       "company": "Anthropic",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-databricks",
@@ -33,7 +33,7 @@
       "company": "Databricks",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-gitlab",
@@ -42,7 +42,7 @@
       "company": "GitLab",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-reddit",
@@ -51,7 +51,7 @@
       "company": "Reddit",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-scaleai",
@@ -60,7 +60,7 @@
       "company": "Scale AI",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-robinhood",
@@ -69,7 +69,7 @@
       "company": "Robinhood",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-asana",
@@ -78,7 +78,7 @@
       "company": "Asana",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-figma",
@@ -87,7 +87,7 @@
       "company": "Figma",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-discord",
@@ -96,7 +96,7 @@
       "company": "Discord",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-nuro",
@@ -105,7 +105,7 @@
       "company": "Nuro",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-airtable",
@@ -114,7 +114,7 @@
       "company": "Airtable",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "greenhouse-vercel",
@@ -123,7 +123,7 @@
       "company": "Vercel",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "ashby-linear",
@@ -132,34 +132,146 @@
       "company": "Linear",
       "enabled": true,
       "captureHtml": false,
-      "minIntervalMinutes": 60
+      "minIntervalMinutes": 720
     },
     {
       "id": "himalayas",
       "adapter": "himalayas",
       "enabled": true,
-      "availabilityTrust": "listing"
+      "availabilityTrust": "listing",
+      "minIntervalMinutes": 120
     },
     {
       "id": "landingjobs",
       "adapter": "landingjobs",
       "enabled": true,
-      "availabilityTrust": "listing"
+      "availabilityTrust": "listing",
+      "minIntervalMinutes": 120
     },
     {
       "id": "remoteok",
       "adapter": "remoteok",
-      "enabled": true
+      "enabled": true,
+      "minIntervalMinutes": 180
     },
     {
       "id": "jobicy",
       "adapter": "jobicy",
-      "enabled": true
+      "enabled": true,
+      "minIntervalMinutes": 180
     },
     {
       "id": "arbeitnow",
       "adapter": "arbeitnow",
-      "enabled": true
+      "enabled": true,
+      "minIntervalMinutes": 120
+    },
+    {
+      "id": "wwr",
+      "adapter": "rss",
+      "endpoint": "https://weworkremotely.com/remote-jobs.rss",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 120
+    },
+    {
+      "id": "ashby-supabase",
+      "adapter": "ashby",
+      "board": "supabase",
+      "company": "Supabase",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-baseten",
+      "adapter": "ashby",
+      "board": "baseten",
+      "company": "Baseten",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-perplexity",
+      "adapter": "ashby",
+      "board": "perplexity",
+      "company": "Perplexity",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-langchain",
+      "adapter": "ashby",
+      "board": "langchain",
+      "company": "LangChain",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-cursor",
+      "adapter": "ashby",
+      "board": "cursor",
+      "company": "Cursor",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-modal",
+      "adapter": "ashby",
+      "board": "modal",
+      "company": "Modal",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-browserbase",
+      "adapter": "ashby",
+      "board": "browserbase",
+      "company": "Browserbase",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-resend",
+      "adapter": "ashby",
+      "board": "resend",
+      "company": "Resend",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "ashby-n8n",
+      "adapter": "ashby",
+      "board": "n8n",
+      "company": "n8n",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "greenhouse-elastic",
+      "adapter": "greenhouse",
+      "board": "elastic",
+      "company": "Elastic",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
+    },
+    {
+      "id": "greenhouse-mongodb",
+      "adapter": "greenhouse",
+      "board": "mongodb",
+      "company": "MongoDB",
+      "enabled": true,
+      "captureHtml": false,
+      "minIntervalMinutes": 720
     }
   ]
 }
