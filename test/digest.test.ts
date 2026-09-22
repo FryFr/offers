@@ -118,3 +118,52 @@ test('--digest entrega, anota la entrega y acumula métricas sin recolectar fuen
     assert.equal(metrics[0].captured, 4);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('--digest-preview imprime el corte y no deja rastro en el ledger ni en las métricas', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'offers-preview-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), JSON.stringify({ skills: ['typescript'], relevance: { roleTerms: ['software engineer'], dailyTarget: 2 } }));
+    // Un segundo perfil que busca otra cosa: es el A/B que la previsualización existe
+    // para permitir, y que con `--digest` era imposible porque cada medición anotaba la entrega.
+    await writeFile(join(root, 'otro-perfil.json'), JSON.stringify({ skills: ['cake decorating'], relevance: { roleTerms: ['pastry chef'], dailyTarget: 2 } }));
+    const fresh = new Date().toISOString();
+    const today = fresh.slice(0, 10);
+    const store = ingest({ version: 1, records: [] }, Array.from({ length: 3 }, (_, i) => {
+      const url = `https://example.com/job-${i}`;
+      return parseOpportunity({ title: 'Senior Software Engineer', company: 'Acme', skills: ['typescript'], remoteness: 'fully_remote',
+        description: 'TypeScript services.', url, publishedAt: today,
+        publicationEvidence: { url, excerpt: 'Published', observedAt: fresh },
+        availability: { url, checkedAt: fresh, outcome: 'open', httpStatus: 200, evidence: 'listing' } });
+    }));
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false, generatedAt: fresh, store, counts: { captured: 3 } }));
+
+    const printed: string[] = [];
+    const log = console.log;
+    console.log = (line: string) => { printed.push(line); };
+    try {
+      assert.equal(await sourcesMain(['--digest-preview'], root), 0);
+      assert.equal(await sourcesMain(['--digest-preview', '--profile', join(root, 'otro-perfil.json')], root), 0);
+    } finally { console.log = log; }
+
+    // La última línea de cada corrida es la métrica; las anteriores, una por recomendación.
+    const conPerfilReal = printed.slice(0, printed.indexOf(printed.find(l => l.startsWith('{'))!) + 1);
+    assert.equal(conPerfilReal.length - 1, 2, 'el corte respeta dailyTarget');
+    assert.match(conPerfilReal[0]!, /Senior Software Engineer/);
+    assert.match(conPerfilReal[0]!, /skills=typescript/);
+    assert.equal(JSON.parse(conPerfilReal.at(-1)!).deliveredNew, 2);
+    // El perfil que busca otra cosa no entrega nada: el A/B mide algo, no imprime lo mismo.
+    assert.equal(JSON.parse(printed.at(-1)!).delivered, 0);
+
+    // CERO consecuencias: ni el ledger, ni las métricas, ni el archivo del digest existen.
+    for (const path of ['data/delivered.json', 'data/metrics.jsonl', `data/digest/${today}.md`]) {
+      await assert.rejects(readFile(join(root, path), 'utf8'), /ENOENT/, `${path} no debe existir tras previsualizar`);
+    }
+
+    // Y un argumento desconocido o una fecha ilegible se rechazan en vez de ignorarse: un `--now`
+    // mal escrito compararía dos cortes de fechas distintas y el diff mentiría sin avisar.
+    assert.equal(await sourcesMain(['--digest-preview', '--now', 'ayer'], root), 2);
+    assert.equal(await sourcesMain(['--digest-preview', '--limit', '5'], root), 2);
+    assert.equal(await sourcesMain(['--digest-preview', '--now'], root), 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

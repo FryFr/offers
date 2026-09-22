@@ -105,37 +105,72 @@ export async function refreshSponsors(options: { root?: string; now?: Date; depe
  * queda por debajo del objetivo durante dos semanas, hay evidencia para pagar cobertura; si no,
  * no hace falta.
  */
+/**
+ * El corte del día, CALCULADO y sin escribir nada.
+ *
+ * Existe aparte de `runDigest` porque comparar dos perfiles sobre el mismo checkpoint era
+ * imposible mientras calcular y entregar fueran la misma función: cada medición anotaba la
+ * entrega en el ledger, así que la segunda corrida ya no veía lo mismo que la primera y el
+ * "antes contra después" medía el instrumento en vez del cambio.
+ *
+ * `profilePath` permite apuntar a otro perfil sin tocar el del repositorio, que es lo que hace
+ * medible un cambio de perfil antes de adoptarlo.
+ */
+export async function computeDigest(options: { root?: string; now?: Date; profilePath?: string } = {}) {
+  const root = options.root ?? repositoryRoot, data = join(root, 'data');
+  const now = options.now ?? new Date();
+  const checkpoint = await json(join(data, 'source-cycle.json')) as { store?: unknown; counts?: Record<string, number>; generatedAt?: string };
+  const profile = parseProfile(await json(options.profilePath ?? join(root, 'examples/profile.json')));
+  const ledger = parseLedger(await optionalJson(join(data, 'delivered.json')));
+  const store = parseStore(checkpoint.store);
+  const snapshot = report(store, profile, now, { delivered: deliveredIds(ledger) });
+  const date = now.toISOString().slice(0, 10);
+  const verified = snapshot.records.filter(r => r.evaluation.verification.status === 'verified');
+  const metric = {
+    date, generatedAt: now.toISOString(),
+    captured: checkpoint.counts?.captured ?? null,
+    verified: verified.length,
+    relevanceStrong: verified.filter(r => r.evaluation.relevance.tier === 'strong').length,
+    relevancePossible: verified.filter(r => r.evaluation.relevance.tier === 'possible').length,
+    delivered: snapshot.recommendations.length,
+    deliveredNew: snapshot.recommendations.filter(r => !r.repeated).length,
+    freelanceCount: snapshot.recommendations.filter(r => r.kind === 'freelance').length,
+    sponsorshipCount: snapshot.recommendations.filter(r => r.sponsors).length,
+    storeRecords: store.records.length,
+  };
+  return { markdown: renderDigest(snapshot, { date, profile }), metric, snapshot, ledger, profile, date, now };
+}
 export async function runDigest(options: { root?: string; now?: Date } = {}) {
   const root = options.root ?? repositoryRoot, data = join(root, 'data');
   await mkdir(join(data, 'digest'), { recursive: true, mode: 0o700 });
   return withMailLock(join(data, 'automation'), async () => {
-    const now = options.now ?? new Date();
-    const checkpoint = await json(join(data, 'source-cycle.json')) as { store?: unknown; counts?: Record<string, number>; generatedAt?: string };
-    const profile = parseProfile(await json(join(root, 'examples/profile.json')));
-    const ledger = parseLedger(await optionalJson(join(data, 'delivered.json')));
-    const store = parseStore(checkpoint.store);
-    const snapshot = report(store, profile, now, { delivered: deliveredIds(ledger) });
-    const date = now.toISOString().slice(0, 10);
-    const markdown = renderDigest(snapshot, { date, profile });
+    const { markdown, metric, snapshot, ledger, date, now } = await computeDigest({ root, now: options.now });
     await atomicWriteText(join(data, 'digest', `${date}.md`), markdown);
-    const nuevas = snapshot.recommendations.filter(r => !r.repeated);
     await atomicMailWrite(join(data, 'delivered.json'), recordDelivery(ledger, snapshot.recommendations.map(r => r.id), now.toISOString()));
-    const verified = snapshot.records.filter(r => r.evaluation.verification.status === 'verified');
-    const metric = {
-      date, generatedAt: now.toISOString(),
-      captured: checkpoint.counts?.captured ?? null,
-      verified: verified.length,
-      relevanceStrong: verified.filter(r => r.evaluation.relevance.tier === 'strong').length,
-      relevancePossible: verified.filter(r => r.evaluation.relevance.tier === 'possible').length,
-      delivered: snapshot.recommendations.length,
-      deliveredNew: nuevas.length,
-      freelanceCount: snapshot.recommendations.filter(r => r.kind === 'freelance').length,
-      sponsorshipCount: snapshot.recommendations.filter(r => r.sponsors).length,
-      storeRecords: store.records.length,
-    };
     await appendFile(join(data, 'metrics.jsonl'), `${JSON.stringify(metric)}\n`, { mode: 0o600 });
     return metric;
   });
+}
+/**
+ * El mismo corte, impreso y sin consecuencias: ni ledger, ni métricas, ni archivo de digest.
+ *
+ * NO toma el lock del ciclo a propósito. Es solo lectura, y las escrituras del proyecto son
+ * atómicas (archivo temporal y rename), así que no hay estado a medio escribir que leer. Tomarlo
+ * haría que previsualizar fallara con `source_lock_busy` justo mientras el ciclo corre, que es
+ * cuando uno quiere mirar.
+ */
+export async function previewDigest(options: { root?: string; now?: Date; profilePath?: string } = {}) {
+  const { snapshot, metric } = await computeDigest(options);
+  const byId = new Map(snapshot.records.map(r => [r.id, r]));
+  const lines = snapshot.recommendations.map(r => {
+    const record = byId.get(r.id);
+    const relevance = record?.evaluation.relevance;
+    return [String(r.rank).padStart(2), r.id.slice(0, 12), r.tier, String(relevance?.score ?? '?').padStart(3),
+      r.roleFamily || '-', `rol=${relevance?.roleMatched.join('|') || '-'}`,
+      `skills=${relevance?.skillsMatched.join('|') || '-'}`,
+      record?.opportunity.title ?? '?', record?.opportunity.company ?? '?'].join(' · ');
+  });
+  return { lines, metric };
 }
 export type HealthReason = 'no_checkpoint' | 'checkpoint_degraded';
 /** Proporción de fuentes habilitadas que deben estar sanas para considerar utilizable el ciclo. */
@@ -222,6 +257,8 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
   if (args.length === 1 && args[0] === '--help') {
     console.log('bin/offers --dry-run [--enrich-model MODEL]   recolecta y persiste el checkpoint\n'
       + 'bin/offers --digest                          entrega el corte del dia (solo lectura)\n'
+      + 'bin/offers --digest-preview [--now TS] [--profile RUTA]\n'
+      + '                                             imprime el corte SIN anotarlo: ni ledger, ni metricas\n'
       + 'bin/offers --health                          quorum de fuentes del ultimo ciclo\n'
       + 'bin/offers --refresh-sponsors                registro britanico de patrocinadores\n'
       + 'bin/offers --verify-schema                   compara la base Notion con lo que se enviaria\n'
@@ -251,6 +288,27 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
       console.error(message === 'ledger_invalid' ? 'ledger_invalid' : 'digest_failed'); return 4;
     }
+  }
+  if (args[0] === '--digest-preview') {
+    // Se parsea a mano y se RECHAZA lo desconocido: un `--now` mal escrito que se ignorara en
+    // silencio compararía dos cortes de fechas distintas y el diff mentiría sin avisar.
+    const options: { root: string; now?: Date; profilePath?: string } = { root };
+    for (let i = 1; i < args.length; i += 2) {
+      const value = args[i + 1];
+      if (value === undefined) { console.error('digest_preview_arguments'); return 2; }
+      if (args[i] === '--now') {
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) { console.error('digest_preview_now_invalid'); return 2; }
+        options.now = parsed;
+      } else if (args[i] === '--profile') options.profilePath = resolve(value);
+      else { console.error('digest_preview_arguments'); return 2; }
+    }
+    try {
+      const { lines, metric } = await previewDigest(options);
+      for (const line of lines) console.log(line);
+      console.log(JSON.stringify(metric));
+      return 0;
+    } catch (error) { console.error(error instanceof Error ? error.message : 'digest_preview_failed'); return 4; }
   }
   if (args.length === 1 && args[0] === '--refresh-sponsors') {
     try { console.log(JSON.stringify(await refreshSponsors({ root }))); return 0; }
