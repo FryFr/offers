@@ -7,6 +7,13 @@ export interface EvaluatedRecord { id: string; opportunity: Opportunity; evaluat
 const RESERVED_PER_KIND = 5;
 /** Plazas garantizadas para ofertas que declaran patrocinio de visado. */
 const RESERVED_FOR_SPONSORSHIP = 3;
+/**
+ * Plazas por familia de rol, para que buscar varios perfiles a la vez no degenere en buscar solo
+ * el que más volumen publica. Es también lo que vuelve medible la decisión de buscar varios: a las
+ * dos semanas las métricas dicen qué familia produjo entrevistas, y la que no produzca se apaga
+ * borrando su clave del perfil.
+ */
+const RESERVED_PER_FAMILY = 5;
 /** Tope del bono de recencia. Acotado a propósito: inclina, no decide. */
 const RECENCY_BONUS = 12;
 /** Tiers admitidos en el corte diario. */
@@ -42,25 +49,53 @@ export function recommend(records: EvaluatedRecord[], options: { dailyTarget?: n
       { points: e.relevance.sponsorshipBonus, reason: e.relevance.sponsorshipBonus ? `Patrocinio de visado declarado (${r.opportunity.sponsorship?.scope ?? 'sin alcance'})` : 'Sin señal de patrocinio' },
     ];
     return { id: r.id, kind: e.classification.kind, tier: e.relevance.tier, sameDay: e.verification.sameDay,
-      repeated: delivered.has(r.id),
+      repeated: delivered.has(r.id), roleFamily: e.relevance.roleFamily,
       sponsors: r.opportunity.sponsorship?.status === 'stated', priority: reasons.reduce((sum, x) => sum + x.points, 0), reasons };
   // Lo ya entregado se DEGRADA, no se elimina: si solo hay 6 nuevas, completar con repetidas
   // marcadas es mejor que entregar seis y dejar creer que no había más.
   }).sort((a, b) => Number(a.repeated) - Number(b.repeated) || b.priority - a.priority || a.id.localeCompare(b.id));
 
-  // Reservas: por tipo, para que freelance no desaparezca bajo el volumen de empleo; y por
-  // patrocinio, porque migrar es objetivo propio y un bono no garantiza nada — con suficientes
-  // vacantes locales bien puntuadas, las que patrocinan quedarían siempre fuera del corte.
-  const reserved = new Set([
-    ...['employment', 'freelance'].flatMap(kind => candidates.filter(c => c.kind === kind).slice(0, RESERVED_PER_KIND).map(c => c.id)),
-    ...candidates.filter(c => c.sponsors).slice(0, RESERVED_FOR_SPONSORSHIP).map(c => c.id),
-  ]);
+  // Reservas: por tipo, para que freelance no desaparezca bajo el volumen de empleo; por
+  // patrocinio, porque migrar es objetivo propio y un bono no garantiza nada —con suficientes
+  // vacantes locales bien puntuadas, las que patrocinan quedarían siempre fuera del corte—; y por
+  // familia de rol, para que buscar tres perfiles a la vez no se convierta en buscar solo el que
+  // más volumen publica.
+  // Con una sola familia la reserva por familia no protege nada: sería proteger a un grupo de sí
+  // mismo, y aun así gastaría plazas que le quitaría a las reservas que sí separan algo escaso.
+  const present = [...new Set(candidates.map(c => c.roleFamily).filter(Boolean))];
+  const families = present.length > 1 ? present : [];
+  const groups = [
+    ...['employment', 'freelance'].map(kind => ({ label: `entre los primeros ${RESERVED_PER_KIND} de su tipo; reserva de balance`, quota: RESERVED_PER_KIND, queue: candidates.filter(c => c.kind === kind) })),
+    { label: 'reserva de patrocinio de visado', quota: RESERVED_FOR_SPONSORSHIP, queue: candidates.filter(c => c.sponsors) },
+    ...families.map(family => ({ label: `reserva de la familia de rol ${family}`, quota: RESERVED_PER_FAMILY, queue: candidates.filter(c => c.roleFamily === family) })),
+  ].map(g => ({ ...g, taken: 0, cursor: 0 }));
+
+  // Las reservas se reparten POR RONDAS, no volcando la unión de todas al frente de la cola.
+  // Volcarlas funcionaba mientras cupieran: con tres familias y un tope de quince, las reservas
+  // suman más plazas que el corte entero, y entonces "primero todo lo reservado, ordenado por
+  // prioridad" deja fuera a la familia que puntúa más bajo — que es exactamente a la que la
+  // reserva existía para proteger. Por rondas, cada grupo cobra su primera plaza antes de que
+  // ninguno cobre la segunda, así que un tope escaso se reparte en vez de adjudicarse.
   const selected = new Set<string>();
-  for (const c of [...candidates.filter(c => reserved.has(c.id)), ...candidates.filter(c => !reserved.has(c.id))]) {
+  const why = new Map<string, string>();
+  for (let round = 0; round < Math.max(0, ...groups.map(g => g.quota)) && selected.size < limit; round += 1) {
+    for (const g of groups) {
+      if (selected.size >= limit || g.taken >= g.quota) continue;
+      while (g.cursor < g.queue.length && selected.has(g.queue[g.cursor]!.id)) g.cursor += 1;
+      if (g.cursor >= g.queue.length) continue;
+      const c = g.queue[g.cursor]!;
+      selected.add(c.id);
+      why.set(c.id, g.label);
+      g.taken += 1;
+    }
+  }
+  // Las plazas que las reservas no llegaron a usar se adjudican por prioridad pura.
+  for (const c of candidates) {
     if (selected.size >= limit) break;
+    if (selected.has(c.id)) continue;
     selected.add(c.id);
+    why.set(c.id, 'seleccionada por prioridad en plazas restantes');
   }
   return candidates.filter(c => selected.has(c.id)).map((c, index) => ({ ...c, rank: index + 1,
-    selectionReason: `${c.repeated ? 'Repetida (ya entregada antes); ' : ''}${!reserved.has(c.id) ? 'seleccionada por prioridad en plazas restantes'
-      : c.sponsors ? 'reserva de patrocinio de visado' : `entre los primeros ${RESERVED_PER_KIND} de su tipo; reserva de balance`}` }));
+    selectionReason: `${c.repeated ? 'Repetida (ya entregada antes); ' : ''}${why.get(c.id)}` }));
 }

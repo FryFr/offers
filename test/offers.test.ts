@@ -299,6 +299,36 @@ test('la reserva por tipo sobrevive al volumen y el tipo desconocido compite en 
   assert.ok(result.recommendations.every(r => r.tier !== 'off_target'));
 });
 
+test('la familia de rol que menos puntúa conserva sus plazas aunque las reservas no quepan', () => {
+  // Buscar tres perfiles a la vez solo es honesto si el que publica menos volumen —o peor
+  // pagado— no desaparece del corte. Aquí management no declara salario, así que pierde los 50
+  // puntos de elegibilidad y objetivo frente a IA y robótica: sin reserva por familia caería
+  // entero, y la decisión de las dos semanas ("qué familia produjo entrevistas") sería
+  // incontestable porque una de las tres nunca se habría entregado.
+  const tresFamilias = parseProfile({
+    skills: ['TypeScript'], remoteOnly: true,
+    relevance: {
+      dailyTarget: 9,
+      roleTerms: { ai: ['ai engineer'], robotics: ['robotics engineer'], management: ['engineering manager'] },
+    },
+  });
+  const pagadas = (role: string) => Array.from({ length: 20 }, (_, i) => verifiedOpportunity({
+    title: `${role} ${i}`, kind: 'employment', relocationRequired: false,
+    compensation: { currency: 'USD', period: 'month', min: 7000 },
+  }));
+  const sinSalario = Array.from({ length: 3 }, (_, i) => verifiedOpportunity({ title: `Engineering Manager ${i}`, kind: 'employment', relocationRequired: false }));
+  const result = report(ingest(empty(), [...pagadas('AI Engineer'), ...pagadas('Robotics Engineer'), ...sinSalario]), tresFamilias, now);
+  const porFamilia = (family: string) => result.recommendations.filter(r => r.roleFamily === family);
+
+  assert.equal(result.recommendations.length, 9);
+  // La premisa: management puntúa por debajo de TODAS las demás. Si esto dejara de ser cierto,
+  // la prueba pasaría sin demostrar nada.
+  const peorDeLasOtras = Math.min(...result.recommendations.filter(r => r.roleFamily !== 'management').map(r => r.priority));
+  assert.ok(porFamilia('management').every(r => r.priority < peorDeLasOtras), 'management debe ser la familia peor puntuada');
+  for (const family of ['ai', 'robotics', 'management']) assert.ok(porFamilia(family).length >= 2, `la familia ${family} se quedó sin plazas`);
+  assert.match(porFamilia('management')[0]!.selectionReason, /familia de rol management/);
+});
+
 test('verificación: ausencias, fechas futuras, evidencia ajena y vencimiento bloquean recomendaciones', () => {
   for (const overrides of [
     { publishedAt: undefined }, { publicationEvidence: undefined }, { availability: undefined },
