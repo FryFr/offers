@@ -7,7 +7,7 @@ import { renderDigest } from './digest.ts';
 import { parseStore, report } from './pipeline.ts';
 import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts';
 import { parseRegistry } from './source-registry.ts';
-import { runSourceCycle, type CycleOptions, type SourceState } from './multi-source.ts';
+import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
 import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
@@ -257,6 +257,7 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
   if (args.length === 1 && args[0] === '--help') {
     console.log('bin/offers --dry-run [--enrich-model MODEL]   recolecta y persiste el checkpoint\n'
       + 'bin/offers --digest                          entrega el corte del dia (solo lectura)\n'
+      + 'bin/offers --probe-source ADAPTADOR TOKEN     sondea un board antes de anadirlo (solo lectura)\n'
       + 'bin/offers --digest-preview [--now TS] [--profile RUTA]\n'
       + '                                             imprime el corte SIN anotarlo: ni ledger, ni metricas\n'
       + 'bin/offers --health                          quorum de fuentes del ultimo ciclo\n'
@@ -287,6 +288,23 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       const message = error instanceof Error ? error.message : '';
       if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
       console.error(message === 'ledger_invalid' ? 'ledger_invalid' : 'digest_failed'); return 4;
+    }
+  }
+  if (args[0] === '--probe-source') {
+    const [, adapter, token] = args;
+    if (args.length !== 3 || !adapter || !token) { console.error('probe_source_arguments'); return 2; }
+    try {
+      // La fuente se construye POR EL REGISTRO, no a mano: así el sondeo valida exactamente lo
+      // mismo que validará el ciclo, y el endpoint se arma una sola vez en todo el proyecto. Si
+      // el registro rechaza esta configuración, el ciclo también la habría rechazado.
+      const [source] = parseRegistry({ version: 1, sources: [{ id: 'probe', adapter, enabled: true, captureHtml: false,
+        ...(adapter === 'rss' ? { endpoint: token } : { board: token, company: 'Probe' }) }] });
+      const profile = parseProfile(await json(join(root, 'examples/profile.json')));
+      console.log(JSON.stringify(await probeSource(source!, profile, new Date())));
+      return 0;
+    } catch (error) {
+      console.log(JSON.stringify({ ok: false, adapter, board: token, reason: error instanceof Error ? error.message : 'probe_failed' }));
+      return 4;
     }
   }
   if (args[0] === '--digest-preview') {

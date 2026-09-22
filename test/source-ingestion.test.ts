@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { parseRegistry, sourceHeaders, MAX_SOURCES, type Source } from '../src/source-registry.ts';
 import { adaptSource, canonicalUrl } from '../src/source-adapters.ts';
 import { parseRss } from '../src/rss.ts';
-import { collectSource, deduplicate, runSourceCycle } from '../src/multi-source.ts';
+import { collectSource, deduplicate, probeSource, runSourceCycle } from '../src/multi-source.ts';
 import { parseProfile } from '../src/contracts.ts';
 import { identity, ingest, report } from '../src/pipeline.ts';
 import { runSources, runNotionSync, sourceHealth, parseSourceState, sourcesMain } from '../src/source-cli.ts';
@@ -433,4 +433,29 @@ test('--sync surfaces an occupied lock through the CLI', async () => {
     assert.equal(await sourcesMain(['--sync'], root), 3);
     assert.equal(await sourcesMain(['--sync', 'extra'], root), 2);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('--probe-source mide lo que decide si un board sirve: fecha, geografía y rol', async () => {
+  // Adivinar el identificador de un board acierta poco; y un board que EXISTE no es un board que
+  // SIRVA. Lo que decide son tres cosas, y el sondeo las mide antes de tocar sources.json.
+  const body = JSON.parse(await fixture('ashby.json'));
+  const restringida = { ...body.jobs[0], title: 'Senior Backend Engineer', jobUrl: 'https://jobs.ashbyhq.com/acme/job-43', location: 'Remote, US' };
+  const sinFecha = { ...body.jobs[0], title: 'Platform Engineer', jobUrl: 'https://jobs.ashbyhq.com/acme/job-44', publishedAt: undefined };
+  const transport = async () => response(JSON.stringify({ ...body, jobs: [body.jobs[0], restringida, sinFecha] }));
+  const buscador = parseProfile({ skills: ['typescript'], remoteOnly: true, relevance: { roleTerms: { ai_automation: ['backend engineer', 'platform engineer'] } } });
+
+  const probe = await probeSource(source('ashby'), buscador, now, { resolveHost: resolver, transport });
+  assert.equal(probe.jobs, 3);
+  // Sin fecha, el gate de frescura tumba el 100% de sus ofertas. Ese fue el fallo del adaptador
+  // de Greenhouse y costó seis sesiones: el sondeo lo vuelve visible en una línea.
+  assert.equal(probe.withPublishedAt, 2);
+  assert.equal(probe.withinWindow, 2);
+  // Un "Remote, US" no es remoto desde Colombia. Medido el 2026-09-22, ese bloqueo se come el 98%
+  // del pool, así que el volumen bruto de un board no dice nada sobre lo que aportará al corte.
+  assert.equal(probe.geoViable, 2, 'la restringida a US no cuenta como viable');
+  assert.equal(probe.roleRelevant, 2);
+  assert.ok(probe.sample.includes('Backend engineer'));
+
+  // Un board que no existe se reporta como dato, no como excepción: sondear es leer.
+  assert.equal(await sourcesMain(['--probe-source', 'ashby']), 2, 'faltando el token, se rechazan los argumentos');
 });

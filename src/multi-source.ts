@@ -243,3 +243,34 @@ export async function runSourceCycle(options: CycleOptions) {
   return { version: 1 as const, mode: 'dry-run' as const, confirmed: false as const, generatedAt: checkedAt, state, health, jobs, enrichments, store, notionPlan,
     counts: { captured: captures.length, unique: jobs.length, duplicates: captures.length - jobs.length, eligible: notionPlan.records.length, blocked: notionPlan.blocked.length } };
 }
+
+/**
+ * Sondea un board ANTES de añadirlo a `examples/sources.json`. Solo lee: no escribe checkpoint,
+ * ni estado de fuente, ni evidencia.
+ *
+ * Existe porque adivinar el identificador de un board acierta poco —cinco intentos a mano en el
+ * plan dieron dos— y porque un board que existe no es lo mismo que un board que sirve. Reporta
+ * las tres cosas que deciden:
+ *
+ * - `withPublishedAt`: sin fecha, el gate de frescura tumba el 100% de sus ofertas. Ese fue
+ *   exactamente el fallo del adaptador de Greenhouse, y costó seis sesiones encontrarlo.
+ * - `geoViable`: cuántas sobreviven la compuerta de geografía del perfil. Medido el 2026-09-22,
+ *   `remote_region_excluded` bloquea el 98% del pool actual —son "Remote, US only"—, así que el
+ *   volumen bruto de un board no dice nada sobre lo que aportará al corte.
+ * - `sample`: para leer con los ojos si el board publica el puesto que uno busca.
+ */
+export async function probeSource(source: Source, profile: Profile, now: Date, options: SafeReadOptions = {}) {
+  const { jobs, rejected } = await collectSource(source, now, options);
+  const windowStart = now.getTime() - PUBLICATION_WINDOW_DAYS * 86_400_000;
+  const scored = jobs.map(job => ({ job, relevance: relevance(job.opportunity, profile, classify(job.opportunity).kind) }));
+  return {
+    ok: true, adapter: source.adapter, board: source.board ?? source.endpoint,
+    jobs: jobs.length, rejected,
+    withPublishedAt: jobs.filter(j => j.opportunity.publishedAt).length,
+    withinWindow: jobs.filter(j => j.opportunity.publishedAt && Date.parse(j.opportunity.publishedAt) >= windowStart).length,
+    remote: jobs.filter(j => j.opportunity.remote === true || j.opportunity.remoteness === 'fully_remote').length,
+    geoViable: scored.filter(s => !s.relevance.blockers.some(b => b.startsWith('remote_') || b.startsWith('onsite_'))).length,
+    roleRelevant: scored.filter(s => ['strong', 'possible'].includes(s.relevance.tier)).length,
+    sample: scored.filter(s => ['strong', 'possible'].includes(s.relevance.tier)).slice(0, 5).map(s => s.job.opportunity.title),
+  };
+}
