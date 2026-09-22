@@ -16,7 +16,14 @@ export interface Relevance {
   tier: RelevanceTier;
   signals: RelevanceSignal[];
   roleMatched: string[];
+  /**
+   * Familia de rol que mejor coincidió, o `''` si ninguna. Viaja en la salida porque decide qué
+   * currículum se adapta a esta oferta y qué plaza reservada ocupa en el corte diario.
+   */
+  roleFamily: string;
   skillsMatched: string[];
+  /** Habilidades secundarias halladas en el texto. Informan el bono; no entran al denominador. */
+  secondaryMatched: string[];
   blockers: string[];
   /**
    * Bonificación por patrocinio de visado, FUERA de los 100 puntos del score. Se suma en el
@@ -35,6 +42,32 @@ const REMOTE_COMPATIBLE = ['worldwide', 'anywhere', 'global', 'international', '
 const ONSITE_TERMS = ['on site', 'onsite', 'in office', 'in person', 'hybrid', 'presencial', 'hibrido'];
 /** Palabras que un campo de ubicación remota trae sin nombrar región alguna. */
 const REMOTE_NOISE = ['remote', 'remoto', 'fully', 'full', 'time', 'work', 'from', 'home', 'anywhere', 'only', 'based', 'or', 'and', 'in', 'the', 'optional', 'first'];
+
+/** Techo del componente de habilidades completo: núcleo más bono. No cambió al separar las dos
+ *  listas, así que los umbrales 65/40 siguen significando lo mismo. */
+export const SKILL_POINTS = 25;
+/**
+ * Lo que puede aportar el NÚCLEO por sí solo.
+ *
+ * Es 20 y no 25 a propósito. Si el núcleo pudiera llegar al techo, el bono quedaría
+ * matemáticamente inalcanzable justo en las ofertas que mejor encajan —las de núcleo saturado—
+ * que son precisamente las únicas que importan. Un bono que no puede sumar no es un bono.
+ * El precio es que un perfil que coincidía al 100% baja de 25 a 20 puntos; es uniforme para
+ * todas las ofertas, así que reordena nada y solo desplaza la escala.
+ */
+export const CORE_POINTS = 20;
+/** Cuánto puede añadir el bono secundario por encima del núcleo. Acotado para que ampliar la lista
+ *  secundaria nunca compre un `strong` por sí solo: inclina, no decide. */
+export const SECONDARY_BONUS_CAP = 5;
+/**
+ * Cuántas habilidades secundarias coincidentes valen el bono completo.
+ *
+ * NO es 1. Con una lista secundaria larga —lo normal cuando alguien declara todo lo que sabe—
+ * un bono `min(5, coincidentes)` se satura en casi toda oferta, se vuelve una constante y deja de
+ * discriminar, que es justo lo contrario de para lo que existe. Ocho es el punto de partida;
+ * se calibra comparando cortes con `--digest-preview` sobre el mismo store, no a ojo.
+ */
+export const SECONDARY_BONUS_FULL = 8;
 
 const clamp = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
 const quote = (field: string, value: string) => `${field}:"${value.length > 120 ? `${value.slice(0, 117)}...` : value}"`;
@@ -100,11 +133,24 @@ export function relevance(o: Opportunity, p: Profile, kind: Kind): Relevance {
 
   // Rol (0-40). Una coincidencia en el título pesa cinco veces más que una en la descripción:
   // el título declara el puesto, la descripción solo lo menciona.
-  const titleRole = matchedTerms(titleText, config.roleTerms);
-  const descriptionRole = matchedTerms(descriptionText, config.roleTerms).filter(term => !titleRole.includes(term));
-  const rolePoints = Math.min(40, titleRole.length * 20 + descriptionRole.length * 4);
-  const roleMatched = [...titleRole, ...descriptionRole];
-  signals.push({ points: rolePoints, reason: roleMatched.length ? `Rol: ${roleMatched.join(', ')}` : 'Ningún término de rol coincide', ...(titleRole.length ? { evidence: quote('title', o.title) } : {}) });
+  //
+  // Se puntúa contra la familia que MEJOR coincide, no contra la unión de todas. Con la unión,
+  // buscar tres perfiles a la vez hacía que casi cualquier título de ingeniería tocara el techo de
+  // 40 y el componente dejaba de separar una vacante de otra. Empatar a favor de la primera
+  // familia declarada es deliberado: el orden del perfil expresa la preferencia de la persona.
+  const scoreFamily = (terms: string[]) => {
+    const title = matchedTerms(titleText, terms);
+    const description = matchedTerms(descriptionText, terms).filter(term => !title.includes(term));
+    return { title, description, points: Math.min(40, title.length * 20 + description.length * 4) };
+  };
+  const families = Object.entries(config.roleFamilies);
+  const scored = families.map(([family, terms]) => ({ family, ...scoreFamily(terms) }));
+  const best = scored.reduce<{ family: string; title: string[]; description: string[]; points: number }>(
+    (a, b) => (b.points > a.points ? b : a), { family: '', title: [], description: [], points: 0 });
+  const roleFamily = best.family;
+  const rolePoints = best.points;
+  const roleMatched = [...best.title, ...best.description];
+  signals.push({ points: rolePoints, reason: roleMatched.length ? `Rol (${roleFamily}): ${roleMatched.join(', ')}` : 'Ningún término de rol coincide', ...(best.title.length ? { evidence: quote('title', o.title) } : {}) });
   // La exclusión de rol solo aplica al TÍTULO: una vacante de backend puede mencionar al
   // equipo de ventas en su descripción sin dejar de ser de backend.
   const excludedRole = matchedTerms(titleText, config.roleExcludedTerms);
@@ -134,13 +180,27 @@ export function relevance(o: Opportunity, p: Profile, kind: Kind): Relevance {
   }
 
   // Habilidades (0-25) por texto libre con alias, no por igualdad exacta contra un array vacío.
-  const skillsMatched: string[] = [];
-  for (const skill of p.skills) {
+  // El NÚCLEO manda en el denominador y aporta hasta 20; lo secundario solo suma hasta 5 y nunca
+  // entra al denominador. Con una sola lista, declarar honestamente todo lo que uno sabe diluía el
+  // promedio y bajaba el puntaje de TODAS las ofertas, castigando por saber de más.
+  const match = (list: readonly string[]) => list.flatMap(skill => {
     const hit = skillHit(haystack, skill, config.skillAliases);
-    if (hit) skillsMatched.push(hit);
-  }
-  const skillPoints = p.skills.length ? Math.round(25 * (skillsMatched.length / p.skills.length)) : 12;
-  signals.push({ points: skillPoints, reason: p.skills.length ? `Habilidades: ${skillsMatched.length}/${p.skills.length}${skillsMatched.length ? ` (${skillsMatched.join(', ')})` : ''}` : 'Perfil sin habilidades declaradas; puntaje neutro' });
+    return hit ? [hit] : [];
+  });
+  const skillsMatched = match(p.skills);
+  const secondaryMatched = match(p.secondarySkills);
+  // Los 25 puntos se REPARTEN: 20 al núcleo, 5 al bono. La alternativa —dejar que el núcleo
+  // llegue a 25 y que el bono solo rellene el hueco— preservaba los puntajes anteriores, pero
+  // hacía el bono inalcanzable en toda oferta de núcleo saturado, que son justo las que mejor
+  // encajan. Repartiendo, declarar una habilidad secundaria solo puede subir el puntaje, nunca
+  // bajarlo, y el techo del componente sigue siendo 25: los umbrales 65/40 no se mueven.
+  const corePoints = p.skills.length ? Math.round(CORE_POINTS * (skillsMatched.length / p.skills.length)) : CORE_POINTS / 2;
+  const bonusPoints = Math.min(SECONDARY_BONUS_CAP, Math.round(SECONDARY_BONUS_CAP * (secondaryMatched.length / SECONDARY_BONUS_FULL)));
+  const skillPoints = Math.min(SKILL_POINTS, corePoints + bonusPoints);
+  signals.push({ points: corePoints, reason: p.skills.length ? `Habilidades: ${skillsMatched.length}/${p.skills.length}${skillsMatched.length ? ` (${skillsMatched.join(', ')})` : ''}` : 'Perfil sin habilidades declaradas; puntaje neutro' });
+  // La señal se emite aunque el bono sea 0: un "no coincidió ninguna" es una lectura del ranker,
+  // y omitirla obligaría a quien inspecciona a distinguir "no hay secundarias" de "no coincidieron".
+  if (p.secondarySkills.length) signals.push({ points: bonusPoints, reason: `Habilidades secundarias: ${secondaryMatched.length}/${SECONDARY_BONUS_FULL} para el bono completo${secondaryMatched.length ? ` (${secondaryMatched.join(', ')})` : ''}` });
 
   // Geografía (0-15).
   const geo = geography(o, config.relocationTargets);
@@ -157,5 +217,5 @@ export function relevance(o: Opportunity, p: Profile, kind: Kind): Relevance {
 
   const score = clamp(rolePoints + seniorityPoints + skillPoints + geo.points);
   const tier: RelevanceTier = blockers.length ? 'off_target' : score >= 65 ? 'strong' : score >= 40 ? 'possible' : 'weak';
-  return { score, tier, signals, roleMatched, skillsMatched, blockers, sponsorshipBonus };
+  return { score, tier, signals, roleMatched, roleFamily, skillsMatched, secondaryMatched, blockers, sponsorshipBonus };
 }

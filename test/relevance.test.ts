@@ -157,8 +157,100 @@ test('el perfil rechaza claves desconocidas y valores inválidos en relevance', 
   assert.throws(() => parseProfile({ relevance: { dailyTarget: 2.5 } }));
   assert.throws(() => parseProfile({ relevance: { skillAliases: { node: 'not-a-list' } } }));
   assert.throws(() => parseProfile({ relevance: { roleTerms: 'not-a-list' } }));
+  assert.throws(() => parseProfile({ relevance: { roleTerms: { robotics: [] } } }), /familia vacía/);
   // Sin sección relevance el perfil sigue siendo válido y no bloquea nada.
   const plain = parseProfile({});
-  assert.deepEqual(plain.relevance.roleTerms, []);
+  assert.deepEqual(plain.relevance.roleFamilies, {});
   assert.equal(relevance(job(), plain, 'employment').blockers.length, 0);
+});
+
+test('el rol se puntúa contra la familia que mejor coincide, no contra la unión', () => {
+  // Tres familias en una sola bolsa hacían que casi cualquier título de ingeniería tocara el
+  // techo de 40 y el componente dejara de separar una vacante de otra.
+  const multi = parseProfile({
+    skills: ['typescript'],
+    relevance: {
+      roleTerms: {
+        ai_automation: ['ai engineer', 'automation engineer', 'llm engineer'],
+        robotics: ['robotics engineer', 'control engineer'],
+        management: ['engineering manager', 'tech lead'],
+      },
+    },
+  });
+  const familyOf = (title: string) => relevance(job({ title }), multi, 'employment').roleFamily;
+  assert.equal(familyOf('Senior AI Engineer'), 'ai_automation');
+  assert.equal(familyOf('Robotics Engineer'), 'robotics');
+  assert.equal(familyOf('Engineering Manager'), 'management');
+  // Sin coincidencia no se inventa familia: elegir una a ciegas mandaría el currículum equivocado.
+  assert.equal(familyOf('Pastry Chef'), '');
+
+  // Un título que toca DOS familias no suma los puntos de ambas: gana la mejor, y el techo sigue
+  // siendo 40 por familia, no 40 por la unión.
+  const mixed = relevance(job({ title: 'Robotics Engineer and Engineering Manager' }), multi, 'employment');
+  const rolePoints = mixed.signals[0]!.points;
+  assert.equal(rolePoints, 20);
+  assert.ok(['robotics', 'management'].includes(mixed.roleFamily));
+});
+
+test('una lista plana de roleTerms sigue puntuando igual que antes de las familias', () => {
+  // Retrocompatibilidad: la migración de contrato no debe mover ningún ranking existente.
+  const flat = relevance(job({ title: 'Backend Engineer' }), profile, 'employment');
+  assert.equal(flat.roleFamily, 'default');
+  assert.ok(flat.score > 0);
+  assert.deepEqual(parseProfile({ relevance: { roleTerms: ['a', 'b'] } }).relevance.roleFamilies, { default: ['a', 'b'] });
+});
+
+test('una habilidad secundaria suma cuando la oferta la pide y nunca resta cuando no', () => {
+  const base = { skills: ['typescript'], relevance: { roleTerms: ['software engineer'] } };
+  const sinSecundarias = parseProfile(base);
+  const conSecundarias = parseProfile({ ...base, secondarySkills: ['kubernetes', 'terraform', 'golang'] });
+  const ajena = job({ description: 'We build products with typescript.' });
+
+  // LA ASIMETRÍA: sin rastro de lo secundario en el texto, el puntaje es IDÉNTICO. Sin esto,
+  // declarar honestamente todo lo que uno sabe bajaba el puntaje de todas las ofertas.
+  assert.equal(relevance(ajena, conSecundarias, 'employment').score, relevance(ajena, sinSecundarias, 'employment').score);
+
+  const propia = job({ description: 'typescript, kubernetes, terraform and golang.' });
+  assert.ok(relevance(propia, conSecundarias, 'employment').score > relevance(propia, sinSecundarias, 'employment').score);
+  assert.deepEqual(relevance(propia, conSecundarias, 'employment').secondaryMatched, ['kubernetes', 'terraform', 'golang']);
+});
+
+test('el bono secundario es proporcional, no una constante que deja de discriminar', () => {
+  // Con una lista secundaria larga, un bono min(5, coincidentes) se satura en casi toda oferta.
+  const skills = Array.from({ length: 40 }, (_, i) => `skill${i}`);
+  const p = parseProfile({ skills: ['typescript'], secondarySkills: skills, relevance: { roleTerms: ['software engineer'] } });
+  const bonoDe = (n: number) => {
+    const r = relevance(job({ description: `typescript ${skills.slice(0, n).join(' ')}` }), p, 'employment');
+    return r.signals.find(s => s.reason.startsWith('Habilidades secundarias'))!.points;
+  };
+  assert.ok(bonoDe(2) < bonoDe(12), 'dos coincidencias no pueden valer lo mismo que doce');
+  assert.equal(bonoDe(0), 0);
+  assert.equal(bonoDe(30), 5, 'el bono está acotado y nunca compra un strong por sí solo');
+});
+
+test('cada alias declarado en el perfil real coincide de verdad con su habilidad', async () => {
+  // Un alias con guiones, mayúsculas o espacios de más no coincide nunca y apaga la señal en
+  // silencio: hoy nada lo detectaría hasta que alguien midiera por qué bajó el corte.
+  const real = parseProfile(JSON.parse(await readFile(new URL('../examples/profile.json', import.meta.url), 'utf8')));
+  const declaradas = new Set([...real.skills, ...real.secondarySkills]);
+  for (const [skill, aliases] of Object.entries(real.relevance.skillAliases)) {
+    assert.ok(declaradas.has(skill), `alias huérfano: "${skill}" no está en skills ni en secondarySkills`);
+    for (const alias of aliases) {
+      const r = relevance(job({ description: `We use ${alias} every day.` }), real, 'employment');
+      const hallado = [...r.skillsMatched, ...r.secondaryMatched];
+      // Se comprueba que la habilidad SE DETECTE, no con qué etiqueta: skillHit devuelve el primer
+      // variante que coincide, que a menudo es la forma canónica y no el alias que disparó.
+      assert.ok(hallado.includes(alias) || hallado.includes(skill), `el alias "${alias}" de "${skill}" no detecta la habilidad`);
+    }
+  }
+});
+
+test('ningún término de rol del perfil real colisiona con una familia excluida', async () => {
+  const real = parseProfile(JSON.parse(await readFile(new URL('../examples/profile.json', import.meta.url), 'utf8')));
+  for (const [family, terms] of Object.entries(real.relevance.roleFamilies)) {
+    for (const term of terms) {
+      assert.deepEqual(matchedTerms(canonical(term), real.relevance.roleExcludedTerms), [],
+        `"${term}" (familia ${family}) cae en roleExcludedTerms: la familia entera quedaría off_target`);
+    }
+  }
 });

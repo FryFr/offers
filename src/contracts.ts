@@ -86,8 +86,19 @@ export interface Opportunity {
  * porque responde otra pregunta: screening decide qué descartar, relevance decide qué encaja.
  */
 export interface RelevanceConfig {
-  /** Familias de términos del rol objetivo, cotejadas contra título y descripción. */
-  roleTerms: string[];
+  /**
+   * Términos del rol objetivo AGRUPADOS POR FAMILIA, cotejados contra título y descripción.
+   *
+   * Es un mapa y no una lista porque una persona puede buscar varios perfiles a la vez (ingeniería
+   * de IA, robótica, management) y el puntaje de rol satura en 40: con todos los términos en una
+   * sola bolsa, casi cualquier título de ingeniería toca el techo y el componente deja de separar
+   * una vacante de otra. Se puntúa contra la familia que MEJOR coincide, y cuál ganó viaja en la
+   * salida porque decide qué currículum se adapta — uno que dice ser las tres cosas no gana ninguna.
+   *
+   * En el JSON, `roleTerms` admite tanto una lista plana (se normaliza a la familia `default`)
+   * como un objeto de familias. Los perfiles anteriores siguen puntuando exactamente igual.
+   */
+  roleFamilies: Record<string, string[]>;
   /** Familias de rol que descartan de plano (ventas, nómina, legal…), no términos sueltos. */
   roleExcludedTerms: string[];
   /** Variantes por habilidad: `node.js` no coincide con `nodejs` ni con `node` sin esto. */
@@ -98,7 +109,19 @@ export interface RelevanceConfig {
   dailyTarget: number;
 }
 export interface Profile {
+  /**
+   * Habilidades NÚCLEO: las que definen el encaje y las que el currículum vende. Son el
+   * denominador del puntaje de habilidades, así que declarar aquí algo que casi nunca aparece
+   * baja el puntaje de TODAS las ofertas por igual.
+   */
   skills: string[];
+  /**
+   * Habilidades que la persona también tiene pero no son su venta. Suman un bono acotado cuando
+   * la oferta las pide y NO entran al denominador, de modo que saber de más nunca castiga.
+   * Esa asimetría es deliberada: sin ella, declarar honestamente todo lo que uno sabe empeoraba
+   * el ranking de las ofertas que mejor encajan.
+   */
+  secondarySkills: string[];
   relevance: RelevanceConfig;
   preferredKinds: Exclude<Kind, 'unknown'>[];
   remoteOnly: boolean;
@@ -113,10 +136,10 @@ export interface Profile {
   excludedIndustries: string[];
 }
 export const defaultRelevance: RelevanceConfig = {
-  roleTerms: [], roleExcludedTerms: [], skillAliases: {}, relocationTargets: [], dailyTarget: 10,
+  roleFamilies: {}, roleExcludedTerms: [], skillAliases: {}, relocationTargets: [], dailyTarget: 10,
 };
 export const defaultProfile: Profile = {
-  skills: [], relevance: defaultRelevance, preferredKinds: ['employment', 'freelance'], remoteOnly: false,
+  skills: [], secondarySkills: [], relevance: defaultRelevance, preferredKinds: ['employment', 'freelance'], remoteOnly: false,
   targetHourlyUsd: 25, freelanceFloorHourlyUsd: 25,
   attractiveProjectBudgetUsd: 2000, hoursPerMonth: 160,
   employmentMinimumMonthlyUsd: 3000, employmentTargetMonthlyUsd: 4500,
@@ -254,7 +277,12 @@ export function parseOpportunity(value: unknown): Opportunity {
 }
 export function parseProfile(value: unknown): Profile {
   const v = object(value, 'profile');
-  const p = { ...defaultProfile, skills: strings(v.skills === undefined ? [] : v.skills, 'skills'), preferredKinds: [...defaultProfile.preferredKinds] };
+  const p = { ...defaultProfile, skills: strings(v.skills === undefined ? [] : v.skills, 'skills'),
+    secondarySkills: strings(v.secondarySkills === undefined ? [] : v.secondarySkills, 'secondarySkills'),
+    preferredKinds: [...defaultProfile.preferredKinds] };
+  // Una habilidad en las dos listas contaría dos veces y volvería el bono impredecible; el núcleo manda.
+  const core = new Set(p.skills);
+  if (p.secondarySkills.some(s => core.has(s))) throw new Error('secondarySkills: habilidad repetida en skills');
   if (v.preferredKinds !== undefined) {
     const kinds = strings(v.preferredKinds, 'preferredKinds');
     if (!kinds.length || kinds.some(k => !['employment', 'freelance'].includes(k))) throw new Error('preferredKinds inválido');
@@ -273,8 +301,20 @@ function parseRelevance(value: unknown): RelevanceConfig {
   // Cerrado a propósito: una clave mal escrita aquí apagaría en silencio una señal de relevancia.
   const known = ['roleTerms', 'roleExcludedTerms', 'skillAliases', 'relocationTargets', 'dailyTarget'];
   if (Object.keys(v).some(k => !known.includes(k))) throw new Error('relevance: clave desconocida');
-  const config: RelevanceConfig = { ...defaultRelevance, skillAliases: {} };
-  for (const key of ['roleTerms', 'roleExcludedTerms', 'relocationTargets'] as const) config[key] = strings(v[key] ?? defaultRelevance[key], `relevance.${key}`);
+  const config: RelevanceConfig = { ...defaultRelevance, roleFamilies: {}, skillAliases: {} };
+  for (const key of ['roleExcludedTerms', 'relocationTargets'] as const) config[key] = strings(v[key] ?? defaultRelevance[key], `relevance.${key}`);
+  // Lista plana -> una sola familia. Los perfiles escritos antes de las familias puntúan igual que
+  // siempre: con un único grupo, "la familia que mejor coincide" es la misma bolsa de antes.
+  if (Array.isArray(v.roleTerms)) config.roleFamilies = { default: strings(v.roleTerms, 'relevance.roleTerms') };
+  else if (v.roleTerms !== undefined) {
+    for (const [family, terms] of Object.entries(object(v.roleTerms, 'relevance.roleTerms'))) {
+      const name = str(family, 'relevance.roleTerms').toLowerCase();
+      const list = strings(terms, `relevance.roleTerms.${family}`);
+      // Una familia vacía puntuaría 0 y competiría por una plaza reservada sin poder ganarla nunca.
+      if (!list.length) throw new Error(`relevance.roleTerms.${family}: familia vacía`);
+      config.roleFamilies[name] = list;
+    }
+  }
   if (v.dailyTarget !== undefined) {
     config.dailyTarget = positive(v.dailyTarget, 'relevance.dailyTarget');
     if (!Number.isSafeInteger(config.dailyTarget)) throw new Error('relevance.dailyTarget: entero requerido');

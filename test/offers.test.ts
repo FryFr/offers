@@ -9,7 +9,11 @@ import { normalize, classify, expiration, evaluate, verification, PUBLICATION_WI
 import { identity, ingest, parseStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
 import { FX, FX_MAX_AGE_DAYS, toUsd } from '../src/fx.ts';
 
-const profile = parseProfile({ skills: ['TypeScript'], remoteOnly: true });
+// El perfil de las pruebas DECLARA el rol que busca. Antes no lo hacía y sus ofertas entraban al
+// corte igual, porque el componente de habilidades saturaba y las empujaba justo por encima de 40.
+// Eso ataba pruebas de recomendación —topes, reservas, recencia— a un margen de tres puntos en un
+// componente que no estaban probando: separar núcleo de secundarias las tumbó todas de golpe.
+const profile = parseProfile({ skills: ['TypeScript'], remoteOnly: true, relevance: { roleTerms: ['developer', 'software engineer'] } });
 const now = new Date('2026-09-16T12:00:00Z');
 const empty = (): Store => ({ version: 1, records: [] });
 const evidence = {
@@ -18,7 +22,9 @@ const evidence = {
   availability: { url: 'https://example.com/job', checkedAt: now.toISOString(), outcome: 'open' as const, httpStatus: 200, evidence: 'Job details and active application form' },
 };
 const verifiedOpportunity = (overrides: Partial<Opportunity> = {}) => opportunity({ ...evidence, source: 'test', externalId: overrides.title ?? 'Developer', ...overrides });
-const opportunity = (overrides: Partial<Opportunity> = {}): Opportunity => parseOpportunity({ title: 'Developer', company: 'Acme', kind: 'freelance', skills: ['TypeScript'], remote: true, ...overrides });
+// La descripción por defecto existe para que las pruebas que cambian el TÍTULO (`Today`, `Expired`,
+// `Job 0`…) sigan siendo ofertas relevantes: el título ahí identifica el caso, no describe el puesto.
+const opportunity = (overrides: Partial<Opportunity> = {}): Opportunity => parseOpportunity({ title: 'Developer', company: 'Acme', kind: 'freelance', skills: ['TypeScript'], remote: true, description: 'We are hiring a remote developer, a software engineer, to build TypeScript services.', ...overrides });
 
 test('contratos validan fechas, tipos, rangos y perfil', () => {
   assert.deepEqual(profile.skills, ['typescript']);
@@ -211,7 +217,7 @@ test('recomendaciones: tope configurable, balance, orden explicable y desempate 
   // El tope lo fija el perfil, no una constante: un corte diario es una preferencia, no una regla.
   assert.equal(result.recommendations.length, profile.relevance.dailyTarget);
   assert.equal(result.recommendations.filter(r => r.kind === 'freelance').length, 5, 'la reserva por tipo protege freelance del volumen de empleo');
-  const wider = report(state, parseProfile({ skills: ['TypeScript'], remoteOnly: true, relevance: { dailyTarget: 25 } }), now);
+  const wider = report(state, parseProfile({ skills: ['TypeScript'], remoteOnly: true, relevance: { roleTerms: ['developer', 'software engineer'], dailyTarget: 25 } }), now);
   assert.equal(wider.recommendations.length, 25);
   assert.deepEqual(report({ ...state, records: [...state.records].reverse() }, profile, now).recommendations, result.recommendations);
   result.recommendations.forEach((r, i) => {
