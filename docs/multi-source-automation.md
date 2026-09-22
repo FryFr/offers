@@ -12,7 +12,7 @@ This implementation adds a separate, dry-run-only source cycle to the existing e
 
 ## Run locally
 
-Requires Node >=22.18 and the locked development dependencies for typecheck. Review `examples/sources.json`; sources ship disabled. Replace ATS board/company placeholders and enable only permitted sources. Review source terms, attribution and published usage limits before enabling. The default Remotive cadence is six hours; other sources default to one hour with a 15-minute minimum. No automatic retries are made for rate limits, CAPTCHA or authentication failures. No logged-in browser scraping, session cookies, anti-bot evasion or LinkedIn/Indeed/Glassdoor capture is supported. Mail ingestion remains in its existing local workflow.
+Requires Node >=22.18 and the locked development dependencies for typecheck. Review `examples/sources.json`; sources ship disabled. Replace ATS board/company placeholders and enable only permitted sources. Review source terms, attribution and published usage limits before enabling. Cadence is per source. Remote aggregators -- the ones that actually produce the digest -- run at the registry's own minimum for their adapter, between two and six hours. Company ATS boards run every twelve hours: a company does not post twenty-four times a day, and the ceiling is the 24-hour verification TTL, since at a 1440-minute cadence the previous availability check expires exactly as the next one arrives and offers flicker to `stale`. No automatic retries are made for rate limits, CAPTCHA or authentication failures. No logged-in browser scraping, session cookies, anti-bot evasion or LinkedIn/Indeed/Glassdoor capture is supported. Mail ingestion remains in its existing local workflow.
 
 ```sh
 npm ci
@@ -71,6 +71,29 @@ To produce mapped payloads, supply the existing ignored `data/notion-local.json`
 5. Review node compatibility in the installed n8n version. Use manual execution to verify stdout JSON and exit handling. The Code node rejects nonzero exit codes, malformed results or a dry-run gate mismatch. Ingestion also rejects all-disabled/no-healthy-source results. Health runs every 15 minutes; ingestion is scheduled hourly, with provider cadence enforced by the persistent checkpoint. Keep schedules inactive until a separately authorized deployment.
 
 No inbound HTTP endpoint, arbitrary command webhook or durable remote queue is introduced. The workflow uses SSH to the dedicated public-source worker, not to the Mac. This leaves the earlier Mac-mail/VPS design boundary unchanged. Only one worker copy may own a checkpoint; local file locks are not a distributed lock. Workflow automatic retry is off; use cadence-controlled subsequent runs. n8n execution timeout is one hour; if it expires, inspect the remote PID before starting another cycle because stopping an SSH session may leave its child running.
+
+## Read-only tools for deciding
+
+Two subcommands exist to make a decision measurable before it is taken. Neither writes anything.
+
+```sh
+bin/offers --probe-source ashby supabase
+bin/offers --digest-preview [--now TIMESTAMP] [--profile PATH]
+```
+
+`--probe-source` reads one board and reports whether it exists, how many offers it lists, how many carry
+`publishedAt`, how many fall inside the freshness window, how many survive the profile's geography gate, and a
+sample of the relevant titles. The last two are what decide: a board with hundreds of offers that are all
+"Remote, US only" contributes nothing to the cut, and a board whose offers carry no date has 100% of them dropped
+by the freshness gate -- the exact bug that hid in the Greenhouse adapter for six sessions. Probe before editing
+`examples/sources.json`, never after. The source is built through the registry, so the probe validates exactly
+what the cycle will validate.
+
+`--digest-preview` prints the daily cut without recording it: no delivery ledger, no metrics line, no digest file.
+`--profile` points it at an alternative profile, which is what makes a profile change measurable -- run it twice
+over the same checkpoint with the same `--now` and diff. It deliberately does not take the cycle lock, since it
+only reads and every write in this project is atomic; taking the lock would make previewing fail while the cycle
+runs, which is when you want to look.
 
 ## Health and recovery
 
