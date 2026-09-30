@@ -328,12 +328,25 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
         : ATS_ADAPTERS.includes(source.adapter as typeof ATS_ADAPTERS[number]) ? `public_ats_listing:${endpoint}#${externalId}`
         : expires && Date.parse(expires) > now.getTime() ? `provider_expiry_assertion:${endpoint}#${externalId}@${expires}`
         : undefined;
+      /**
+       * La descripción se acota UNA VEZ y esa única variable se reutiliza.
+       *
+       * `DESCRIPTION_LIMIT` solo se aplicaba dentro de `htmlToText`, que es el camino de Greenhouse;
+       * los otros nueve adaptadores guardaban hasta 100.000 caracteres, cinco veces el tope.
+       *
+       * Y acotarla en dos sitios sería un error esperando ocurrir: el mismo texto alimenta al
+       * detector de patrocinio y al campo almacenado, y `parseOpportunity` exige que la cita
+       * aparezca LITERALMENTE en la descripción guardada. Si el detector viera más texto que el
+       * campo, una cita del tramo cortado haría fallar el contrato. Calcularla una vez lo vuelve
+       * estructuralmente imposible.
+       */
+      const descriptionText = optional(description)?.slice(0, DESCRIPTION_LIMIT);
       // Se lee en la captura, cuando la descripción ya está en memoria y no cuesta una petición.
-      const sponsorship = sponsorshipFromDescription(optional(description), observedAt);
+      const sponsorship = sponsorshipFromDescription(descriptionText, observedAt);
       const opportunity = parseOpportunity({ title: text(title, 500), company: text(company, 200), url: normalizedUrl, source: source.id, skills: skills ?? [],
         ...(levels?.length ? { seniority: levels } : {}),
         ...(expires ? { expiresAt: expires } : {}),
-        ...(optional(description) ? { description: optional(description) } : {}), ...(optional(location) ? { location: optional(location) } : {}),
+        ...(descriptionText ? { description: descriptionText } : {}), ...(optional(location) ? { location: optional(location) } : {}),
         ...(mode !== undefined ? { remoteness: mode } : remote !== undefined ? { remote } : {}),
         ...(contract !== undefined ? { employmentType: contract } : {}),
         ...(restrictions?.length ? { locationRestrictions: restrictions } : {}),

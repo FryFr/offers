@@ -543,3 +543,20 @@ test('la salud del ciclo se lee de un archivo de KB, no del checkpoint', async (
     assert.equal((await sourceHealth(root, new Date(summary.generatedAt))).healthy, true, 'el respaldo por checkpoint sigue funcionando');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('la descripción se acota en todos los adaptadores, no solo en greenhouse', async () => {
+  // `DESCRIPTION_LIMIT` vivía dentro de `htmlToText`, que es el camino de Greenhouse. Los otros
+  // nueve adaptadores guardaban hasta 100.000 caracteres, cinco veces el tope.
+  const largo = `Build TypeScript services. ${'x'.repeat(60_000)}`;
+  const body = JSON.parse(await fixture('ashby.json'));
+  const { jobs } = adaptSource(source('ashby'), JSON.stringify({ ...body, jobs: [{ ...body.jobs[0], descriptionPlain: largo }] }), now);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0]!.opportunity.description!.length, 20_000, 'acotada al tope declarado');
+
+  // Y la invariante que hace peligroso acotar en dos sitios: si el detector de patrocinio viera
+  // más texto que el campo guardado, una cita del tramo cortado haría fallar `parseOpportunity`.
+  const citaCortada = `Build services. ${'y'.repeat(25_000)} We sponsor visas for this role.`;
+  const conCita = adaptSource(source('ashby'), JSON.stringify({ ...body, jobs: [{ ...body.jobs[0], descriptionPlain: citaCortada }] }), now);
+  assert.equal(conCita.jobs.length, 1, 'la fila no se rechaza: el detector ve el mismo texto acotado');
+  assert.equal(conCita.jobs[0]!.opportunity.sponsorship, undefined, 'la mención quedó fuera del tope y no se afirma');
+});
