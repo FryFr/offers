@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { normalize, classify, expiration, evaluate, verification, PUBLICATION_WINDOW_DAYS } from '../src/evaluate.ts';
-import { identity, ingest, parseStore, pruneStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
+import { compactHistory, identity, ingest, parseStore, pruneStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
 import { FX, FX_MAX_AGE_DAYS, toUsd } from '../src/fx.ts';
 
 // El perfil de las pruebas DECLARA el rol que busca. Antes no lo hacía y sus ofertas entraban al
@@ -499,4 +499,37 @@ test('la purga es idempotente y no borra nada en la segunda pasada', () => {
   // Los días de gracia son un parámetro, no una constante incrustada, y se validan.
   assert.equal(pruneStore(state, profile, now, 0).report.wouldRemove >= 1, true);
   for (const invalid of [-1, 1.5, Number.NaN]) assert.throws(() => pruneStore(state, profile, now, invalid), /graceDays/);
+});
+
+test('compactHistory aplica la regla al historial ya escrito y no pierde texto recuperable', () => {
+  // `ingest` solo evita la repetición en revisiones nuevas. Lo escrito antes conserva su copia:
+  // medido el 2026-09-30, 12.829 de 27.225 revisiones repetían la descripción siguiente, 66,9 MB.
+  const description = 'Build TypeScript services for a distributed team.';
+  const base = verifiedOpportunity({ description });
+  // Se construye un historial "viejo" a mano, con la descripción repetida en cada revisión.
+  const viejo: Store = { version: 1, records: [{ id: identity(base), opportunity: base,
+    history: [{ ...base, location: 'Rev 1' }, { ...base, location: 'Rev 2' }] }] };
+  const { store, revisions, compacted } = compactHistory(viejo);
+  assert.equal(revisions, 2);
+  assert.equal(compacted, 2);
+  for (const entry of store.records[0]!.history!) assert.equal('description' in entry, false);
+  // El texto sigue siendo recuperable: se avanza en la cadena hasta la primera que lo trae.
+  assert.equal(store.records[0]!.opportunity.description, description);
+  assert.deepEqual(parseStore(store), store, 'el store compactado sigue cargando');
+  // Idempotente.
+  assert.equal(compactHistory(store).compacted, 0);
+
+  // Una revisión cuya descripción SÍ difiere se conserva entera.
+  const distinta: Store = { version: 1, records: [{ id: identity(base), opportunity: base,
+    history: [{ ...base, description: 'Otro texto por completo.' }] }] };
+  assert.equal(compactHistory(distinta).compacted, 0);
+  assert.equal(compactHistory(distinta).store.records[0]!.history![0]!.description, 'Otro texto por completo.');
+
+  // Y la excepción del patrocinio se respeta también retroactivamente.
+  const quote = 'We sponsor visas.';
+  const conCita = verifiedOpportunity({ description: `Work here. ${quote}`,
+    sponsorship: { status: 'stated', evidence: { kind: 'description_phrase', source: 'test', quote, observedAt: now.toISOString() } } });
+  const conPatrocinio: Store = { version: 1, records: [{ id: identity(conCita), opportunity: conCita, history: [{ ...conCita, location: 'Rev 1' }] }] };
+  assert.equal(compactHistory(conPatrocinio).compacted, 0, 'no se toca una revisión con cita que sostener');
+  assert.deepEqual(parseStore(compactHistory(conPatrocinio).store), compactHistory(conPatrocinio).store);
 });

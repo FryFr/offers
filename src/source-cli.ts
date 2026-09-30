@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { parseProfile } from './contracts.ts';
 import { parseLedger, deliveredIds, recordDelivery } from './delivery-ledger.ts';
 import { renderDigest } from './digest.ts';
-import { parseStore, pruneStore, report } from './pipeline.ts';
+import { compactHistory, parseStore, pruneStore, report } from './pipeline.ts';
 import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts';
 import { parseRegistry } from './source-registry.ts';
 import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from './multi-source.ts';
@@ -141,14 +141,17 @@ export async function vacuumCheckpoint(options: { root?: string; now?: Date; app
   const checkpoint = JSON.parse(raw) as Record<string, unknown> & { store?: unknown; provenance?: Record<string, unknown> };
   const profile = parseProfile(await json(join(root, 'examples/profile.json')));
   const pruned = pruneStore(parseStore(checkpoint.store), profile, now, options.graceDays);
+  // Y se compacta el historial ya escrito: `ingest` solo puede evitar la repetición en las
+  // revisiones nuevas, así que lo acumulado antes conserva su copia de la descripción.
+  const history = compactHistory(pruned.store);
   // La procedencia se poda a las URLs de los registros VIVOS. `runSources` copia todas las claves
   // previas y nunca borra una, así que acumula la de cada oferta que alguna vez se vio.
-  const live = new Set(pruned.store.records.map(r => r.opportunity.url).filter(Boolean));
+  const live = new Set(history.store.records.map(r => r.opportunity.url).filter(Boolean));
   const provenanceBefore = Object.keys(checkpoint.provenance ?? {}).length;
   const provenance = Object.fromEntries(Object.entries(checkpoint.provenance ?? {}).filter(([url]) => live.has(url)));
-  const next = { ...checkpoint, store: pruned.store, provenance };
+  const next = { ...checkpoint, store: history.store, provenance };
   const bytesAfter = JSON.stringify(next, null, 2).length + 1;
-  const report = { ...pruned.report, provenanceKeys: provenanceBefore, provenanceKept: Object.keys(provenance).length,
+  const report = { ...pruned.report, revisions: history.revisions, historyCompacted: history.compacted, provenanceKeys: provenanceBefore, provenanceKept: Object.keys(provenance).length,
     bytesBefore: raw.length, bytesAfter, applied: options.apply === true };
   if (options.apply === true) await atomicMailWrite(path, next);
   return report;
