@@ -95,6 +95,41 @@ over the same checkpoint with the same `--now` and diff. It deliberately does no
 only reads and every write in this project is atomic; taking the lock would make previewing fail while the cycle
 runs, which is when you want to look.
 
+## Application material
+
+```sh
+npm start -- --input - --profile examples/profile.json --state data/offers.json \
+  --candidate-by-family 'data/candidate-facts-{family}.json' \
+  --candidacy-dir output/candidacy --candidacy-pdf
+```
+
+Produces `output/candidacy/<id>/` with `brief.md`, `cover-letter.md`, `cv.md`, `review.json` and,
+with `--candidacy-pdf`, `cv.pdf` and `cover-letter.pdf`. The `<id>` is the same SHA-256 that is the
+record id and Notion's `External Key`, so a board row leads to the folder by copying that cell.
+
+Only offers the board would receive get material: verified, not discarded, employment not
+ineligible, and relevance tier `strong` or `possible`. `--candidacy-tier weak` lowers the bar by
+hand and accepts nothing below that, because `off_target` carries a blocker.
+
+`{family}` is replaced by each key of the profile's `relevance.roleTerms`. A family with no facts
+file produces no package and is reported; it never falls back to another family's CV. `--candidate`
+still works and registers as `default`, which covers only offers with no family at all.
+
+Prose is never generated. The letter quotes declared achievements verbatim, ranked by how many of
+the skills found in this posting each one mentions, and marks the joins as `[TO COMPLETE: ...]`. The
+tailored CV reorders skill groups and the achievements inside each role, and never reorders or trims
+`experience` -- the chronology is a fact. `src/candidacy-review.ts` blocks delivery when a line is
+not backed by the facts, a skill is not in a declared group, a role disappeared, or the chronology is
+out of order.
+
+`--candidacy-pdf` compiles with `lualatex` and verifies the result with `pdftotext`, both system
+binaries like `himalaya`. The template is one column, no icons, no tables, and uses only packages a
+basic TeX install ships. The ATS gate checks there is a text layer, that the posting's keywords
+actually appear, that the page count is right, and -- without normalising, deliberately -- that no
+date carries a non-ASCII hyphen: LaTeX turns `--` into U+2013 and an ATS that discards non-ASCII
+reads `2019-2026` as `20192026`. Hyphenation is disabled for the same reason, after a compiled letter
+was measured to say `min-utes`.
+
 ## Health and recovery
 
 CLI exits: 0 completed plan, 2 invalid arguments, 3 occupied lock, 4 configuration/source/persistence/health failure, 5 unverified schema with blocked records, 6 partial source data. An empty or all-disabled cycle can return 0 locally, but health and n8n ingestion checks flag it. Blocked jobs from missing evidence are expected and distinct from failed sources. A fresh health checkpoint requires an enabled healthy source and no failed/partial sources; snapshots older than 24 hours or future-dated snapshots fail. Source failures remain unhealthy during cooldown. Enrichment warnings are visible in local captures and do not redefine source transport health.
