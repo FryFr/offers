@@ -8,6 +8,7 @@ import { adaptSource, canonicalUrl } from '../src/source-adapters.ts';
 import { parseRss } from '../src/rss.ts';
 import { collectSource, deduplicate, probeSource, runSourceCycle } from '../src/multi-source.ts';
 import { parseOpportunity, parseProfile } from '../src/contracts.ts';
+import { emptyLedger, recordDelivery } from '../src/delivery-ledger.ts';
 import { relevance } from '../src/relevance.ts';
 import { identity, ingest, report } from '../src/pipeline.ts';
 import { runSources, runNotionSync, sourceHealth, parseSourceState, sourcesMain } from '../src/source-cli.ts';
@@ -386,9 +387,12 @@ test('--sync reads the existing checkpoint store and writes through the existing
   const root = await mkdtemp(join(tmpdir(), 'offers-sync-'));
   try {
     await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
-    await writeFile(join(root, 'examples/profile.json'), '{}');
+    // El perfil DECLARA lo que busca: el sync ahora manda solo lo relevante, y con un perfil vacío
+    // toda oferta sale `weak` y el tablero quedaría vacío.
+    const relevante = parseProfile({ skills: ['typescript'], relevance: { roleTerms: ['backend engineer'] } });
+    await writeFile(join(root, 'examples/profile.json'), JSON.stringify({ skills: ['typescript'], relevance: { roleTerms: ['backend engineer'] } }));
     const body = await fixture('ashby.json');
-    const cycle = await runSourceCycle({ sources: [source('ashby')], profile, now, resolveHost: resolver, transport: async () => response(body) });
+    const cycle = await runSourceCycle({ sources: [source('ashby')], profile: relevante, now, resolveHost: resolver, transport: async () => response(body) });
     const checkpoint = { version: 1, mode: 'dry-run', confirmed: false, generatedAt: now.toISOString(),
       health: [{ sourceId: 'ashby', status: 'ok', fetched: 1, rejected: 0, checkedAt: now.toISOString() }], store: cycle.store };
     await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify(checkpoint));
@@ -426,12 +430,16 @@ test('--sync reads the existing checkpoint store and writes through the existing
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('--sync surfaces an occupied lock through the CLI', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'offers-sync-'));
+test('--sync ya no compite con el lock del ciclo por los cincuenta minutos de red', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'offers-sync-lock-'));
   try {
     await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'), { recursive: true, mode: 0o700 });
+    await writeFile(join(root, 'examples/profile.json'), '{}');
+    // El lock de `automation` YA NO se consulta. Si lo hiciera, el sync y el ciclo horario seguirían
+    // peleándose: ambos lo tomaban, así que el sync largo costaba una corrida completa del ciclo.
+    // Con él tomado, el sync llega hasta la comprobación de configuración y sale 5, no 3.
     await writeFile(join(root, 'data/automation.lock'), `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
-    assert.equal(await sourcesMain(['--sync'], root), 3);
+    assert.equal(await sourcesMain(['--sync'], root), 5, 'el lock del ciclo no bloquea el sync');
     assert.equal(await sourcesMain(['--sync', 'extra'], root), 2);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -697,4 +705,53 @@ test('un fallo a mitad de la paginación conserva lo recogido; en la primera pá
   assert.equal(cycle.health[0]!.status, 'partial');
   assert.equal(cycle.health[0]!.reason, 'paged_request_timeout');
   assert.equal(cycle.health[0]!.fetched, 100);
+});
+
+test('el sync manda lo relevante, conserva lo ya entregado y todo con --all', async () => {
+  // Esto revoca a conciencia la decisión de pipeline.ts de enviar TODO lo verificado "para poder
+  // inspeccionar el ranker con un filtro de vista". Con 16.861 registros eso no es un tablero, es un
+  // volcado; y para inspeccionar el ranker está `--digest-preview`, que no cuesta una petición.
+  const root = await mkdtemp(join(tmpdir(), 'offers-sync-tier-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), JSON.stringify({ skills: ['typescript'], relevance: { roleTerms: ['backend engineer'] } }));
+    const perfil = parseProfile({ skills: ['typescript'], relevance: { roleTerms: ['backend engineer'] } });
+    const stamp = (url: string, title: string) => parseOpportunity({ title, company: 'Acme', skills: [], url,
+      description: 'Build typescript services.', publishedAt: now.toISOString().slice(0, 10),
+      publicationEvidence: { url, excerpt: 'Published', observedAt: now.toISOString() },
+      availability: { url, checkedAt: now.toISOString(), outcome: 'open', httpStatus: 200, evidence: 'listing' } });
+    // Una relevante y una que no lo es: el gate de relevancia las separa.
+    const relevante = stamp('https://example.com/si', 'Senior Backend Engineer');
+    const ajena = stamp('https://example.com/no', 'Pastry Chef');
+    const store = ingest({ version: 1, records: [] }, [relevante, ajena]);
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false,
+      generatedAt: now.toISOString(), health: [{ sourceId: 'x', status: 'ok' }], store }));
+    await writeFile(join(root, 'data/notion-local.json'), JSON.stringify({ schemaVerified: true, config: { ...config, enabled: true } }));
+    const keys: string[] = [];
+    const transport: HttpTransport = async request => {
+      if (request.method === 'GET') return { status: 200, body: { object: 'data_source', properties: notionSchema() } };
+      if (request.url.endsWith('/query')) return { status: 200, body: { object: 'list', has_more: false, results: [] } };
+      keys.push(String((request.body.properties as Record<string, { rich_text: { text: { content: string } }[] }>)['External key']!.rich_text[0]!.text.content));
+      return { status: 200, body: { object: 'page', id: 'p' } };
+    };
+    const relevantOnly = await runNotionSync({ root, now, dependencies: { transport } });
+    assert.equal(relevantOnly.counts.total, 1, 'solo la relevante llega al tablero');
+    assert.deepEqual(keys, [identity(relevante)]);
+
+    // `--all` conserva el comportamiento anterior, para repoblar o auditar.
+    keys.length = 0;
+    const todo = await runNotionSync({ root, now, all: true, dependencies: { transport } });
+    assert.equal(todo.counts.total, 2, '--all envía todo lo verificado');
+
+    // Y lo YA ENTREGADO no desaparece del tablero aunque su tier baje: Juan puede haberse postulado.
+    keys.length = 0;
+    await writeFile(join(root, 'data/delivered.json'), JSON.stringify(recordDelivery(emptyLedger(), [identity(ajena)], now.toISOString())));
+    const conEntregada = await runNotionSync({ root, now, dependencies: { transport } });
+    assert.equal(conEntregada.counts.total, 2, 'lo entregado antes se conserva');
+    assert.deepEqual(keys.sort(), [identity(ajena), identity(relevante)].sort());
+
+    // El lock que se sostiene durante la red es el de notion-sync.json, no el del checkpoint.
+    await writeFile(join(root, 'data/notion-sync.json.lock'), `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+    await assert.rejects(runNotionSync({ root, now, dependencies: { transport } }), /existe \.lock/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

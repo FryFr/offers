@@ -29,6 +29,21 @@ export interface NotionConfig {
   includeCalculationContext: boolean;
   propertyMap: Partial<Record<typeof fields[number], string>>;
 }
+/**
+ * Columnas que escribe LA PERSONA, no este módulo.
+ *
+ * Hoy están protegidas por OMISIÓN: `properties()` solo construye las claves de `fields` y el upsert
+ * es un PATCH parcial, así que una columna que no esté en `fields` nunca se toca. Pero depender de
+ * una omisión es frágil —basta que alguien añada un nombre a `fields` sin pensar— y no se puede
+ * probar que la garantía existe. Declararlas la vuelve estructural: `--apply-schema` las crea,
+ * `--verify-schema` las reporta sin afectar a `ok`, y hay una prueba de que `properties()` no las
+ * nombra jamás.
+ *
+ * `Estado` es un select porque es el único campo que Juan edita a mano y del que la Fase 4 deriva los
+ * eventos del embudo. Sus valores viven en el tablero, no aquí: añadir uno no debe tocar código.
+ */
+export const boardFields = { Estado: 'select', 'Applied at': 'date', Notes: 'rich_text' } as const;
+export type BoardField = keyof typeof boardFields;
 export interface HttpRequest { method: 'GET' | 'POST' | 'PATCH'; url: string; headers: Record<string, string>; body: Record<string, unknown> }
 export interface HttpResponse { status: number; body: unknown }
 /** Authentication belongs to the caller's transport; this module never reads credentials. */
@@ -72,7 +87,7 @@ export interface SchemaIssue { property: string; problem: 'missing' | 'wrong_typ
  * Compara el esquema REAL de la base contra lo que este módulo envía. Devuelve la lista de
  * diferencias; una lista vacía es la única evidencia aceptable para escribir.
  */
-export async function verifyNotionSchema(value: unknown, transport: HttpTransport): Promise<{ ok: boolean; issues: SchemaIssue[] }> {
+export async function verifyNotionSchema(value: unknown, transport: HttpTransport): Promise<{ ok: boolean; issues: SchemaIssue[]; board: SchemaIssue[] }> {
   const config = validateNotionConfig(value);
   // GET sobre la data source, no query: el endpoint de query devuelve las FILAS de la base, no
   // sus columnas. Pedirle el esquema a query devuelve siempre vacío.
@@ -89,7 +104,20 @@ export async function verifyNotionSchema(value: unknown, transport: HttpTranspor
     if (!found) issues.push({ property: name, problem: 'missing', expected });
     else if (found !== expected) issues.push({ property: name, problem: 'wrong_type', expected, found });
   }
-  return { ok: !issues.length, issues };
+  /**
+   * Las columnas del tablero se reportan y **no afectan a `ok`**.
+   *
+   * Si `Estado` no existe todavía, el sync no debe caerse: este módulo no las escribe nunca, así que
+   * su ausencia no puede romper una escritura. Quien sí tiene que fallar ruidosamente por ellas es
+   * `--pull-status`, que las LEE y sin ellas no tiene de dónde derivar el embudo.
+   */
+  const board: SchemaIssue[] = [];
+  for (const [property, expected] of Object.entries(boardFields)) {
+    const found = schema[property] ? String(obj(schema[property]).type ?? '') : undefined;
+    if (!found) board.push({ property, problem: 'missing', expected });
+    else if (found !== expected) board.push({ property, problem: 'wrong_type', expected, found });
+  }
+  return { ok: !issues.length, issues, board };
 }
 /**
  * Crea en la base SOLO las propiedades que faltan.
@@ -102,9 +130,12 @@ export async function verifyNotionSchema(value: unknown, transport: HttpTranspor
  */
 export async function applyNotionSchema(value: unknown, transport: HttpTransport): Promise<{ added: string[]; unresolved: SchemaIssue[] }> {
   const config = validateNotionConfig(value);
-  const { issues } = await verifyNotionSchema(config, transport);
-  const missing = issues.filter(issue => issue.problem === 'missing');
-  const unresolved = issues.filter(issue => issue.problem !== 'missing');
+  const { issues, board } = await verifyNotionSchema(config, transport);
+  // Las columnas del tablero se CREAN aquí, aunque el sync no las escriba nunca: si no existieran,
+  // Juan tendría que crearlas a mano con el tipo exacto y `--pull-status` fallaría hasta entonces.
+  // Crear una columna vacía no escribe en ninguna fila.
+  const missing = [...issues, ...board].filter(issue => issue.problem === 'missing');
+  const unresolved = [...issues, ...board].filter(issue => issue.problem !== 'missing');
   if (!missing.length) return { added: [], unresolved };
   // Notion crea una columna con `{ <tipo>: {} }`; las opciones de un select se pueblan solas.
   const properties = Object.fromEntries(missing.map(issue => [issue.property, { [issue.expected]: {} }]));

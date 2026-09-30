@@ -255,21 +255,49 @@ export class SchemaMismatch extends Error {
   issues: SchemaIssue[];
   constructor(issues: SchemaIssue[]) { super('notion_schema_mismatch'); this.issues = issues; }
 }
-export async function runNotionSync(options: { root?: string; now?: Date; limit?: number; dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
+/**
+ * Escribe en Notion lo que de verdad es un tablero.
+ *
+ * Dos cambios estructurales sobre la versión anterior, y los dos vienen de operarlo:
+ *
+ * **El lock del checkpoint cubre la LECTURA, no los cincuenta minutos de red.** Antes se sostenía
+ * `data/source-cycle.json.lock` durante `verifyNotionSchema` y todo el upsert, así que el ciclo
+ * horario chocaba con `source_lock_busy` y se perdía una corrida completa cada vez que el sync
+ * duraba más de una hora. El sync no escribe el checkpoint: solo escribe `data/notion-sync.json`,
+ * y ese es el archivo cuyo lock debe sostener mientras habla con la red.
+ *
+ * **Se sincroniza lo RELEVANTE, y todo con `--all`.** Esto revoca a conciencia la decisión escrita en
+ * `pipeline.ts`: "se envía todo lo verificado para poder inspeccionar el ranker con un filtro de
+ * vista". El argumento era bueno cuando el store tenía cientos de registros; con 16.861 son 16.861
+ * filas, y eso no es un tablero, es un volcado. El objetivo son 10-15 ofertas al día donde el perfil
+ * cuadre, y para inspeccionar el ranker está `--digest-preview`, que no cuesta una petición.
+ */
+export async function runNotionSync(options: { root?: string; now?: Date; limit?: number; all?: boolean; dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
   const root = options.root ?? repositoryRoot, data = join(root, 'data');
   await mkdir(data, { recursive: true, mode: 0o700 });
-  return withMailLock(join(data, 'automation'), () => withMailLock(join(data, 'source-cycle.json'), async () => {
-    const local = await optionalJson(join(data, 'notion-local.json')) as { schemaVerified?: unknown; config?: unknown } | undefined;
-    if (!local || local.schemaVerified !== true) throw new Error('notion_sync_disabled');
-    const config = validateNotionConfig(local.config);
-    if (!config.enabled) throw new Error('notion_sync_disabled');
-    const now = options.now ?? new Date();
-    const health = await sourceHealth(root, now);
-    if (!health.healthy) throw new Error('checkpoint_unhealthy');
+  const local = await optionalJson(join(data, 'notion-local.json')) as { schemaVerified?: unknown; config?: unknown } | undefined;
+  if (!local || local.schemaVerified !== true) throw new Error('notion_sync_disabled');
+  const config = validateNotionConfig(local.config);
+  if (!config.enabled) throw new Error('notion_sync_disabled');
+  const now = options.now ?? new Date();
+  const health = await sourceHealth(root, now);
+  if (!health.healthy) throw new Error('checkpoint_unhealthy');
+  // Lectura del checkpoint BAJO SU LOCK, y solo eso: son segundos, no los minutos de la red.
+  const { records } = await withMailLock(join(data, 'source-cycle.json'), async () => {
     const checkpoint = await json(join(data, 'source-cycle.json')) as { store?: unknown };
     const store = parseStore(checkpoint.store);
     const profile = parseProfile(await json(join(root, 'examples/profile.json')));
-    const records = report(store, profile, now).notion.records;
+    const ledger = parseLedger(await optionalJson(join(data, 'delivered.json')));
+    const snapshot = report(store, profile, now);
+    // Lo relevante, o lo que ya salió en un digest. Lo segundo importa: una oferta que Juan ya vio
+    // y cuyo tier bajó no puede desaparecer del tablero, porque quizá ya se postuló a ella.
+    const delivered = deliveredIds(ledger);
+    const relevant = new Set(snapshot.records
+      .filter(r => ['strong', 'possible'].includes(r.evaluation.relevance.tier) || delivered.has(r.id))
+      .map(r => r.id));
+    return { records: options.all === true ? snapshot.notion.records : snapshot.notion.records.filter(r => relevant.has(r.externalKey)) };
+  });
+  return withMailLock(join(data, 'notion-sync.json'), async () => {
     const transport = options.dependencies?.transport ?? createNotionTransport(fetch, options.dependencies?.env ?? process.env);
     // El esquema se COMPRUEBA contra la base, no se asume. Enviar una propiedad que no existe
     // hace que cada upsert devuelva 400 y `failed` iguale al total: fallar aquí cuesta una
@@ -287,7 +315,7 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
       ...(failures.length ? { failures } : {}) };
     await atomicMailWrite(join(data, 'notion-sync.json'), summary);
     return summary;
-  }));
+  });
 }
 /**
  * Traduce un fallo de Notion a un motivo accionable. Un `notion_sync_failed` genérico obliga a
@@ -317,7 +345,7 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       + 'bin/offers --refresh-sponsors                registro britanico de patrocinadores\n'
       + 'bin/offers --verify-schema                   compara la base Notion con lo que se enviaria\n'
       + 'bin/offers --apply-schema                    crea SOLO las columnas que faltan (nunca cambia tipos)\n'
-      + 'bin/offers --sync [--limit N]                escribe en Notion (exige esquema verificado)\n\n'
+      + 'bin/offers --sync [--all] [--limit N]         escribe en Notion lo relevante (--all: todo lo verificado)\n\n'
       + 'El secreto NOTION_API_KEY se carga desde ~/.config/offers/env (chmod 600) via bin/offers.\n'
       + '--sync comprueba el esquema REAL contra la base antes de escribir y pausa entre registros\n'
       + 'para respetar el limite de Notion. Usa --limit en la primera corrida.\n'
@@ -433,9 +461,18 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       return 4;
     }
   }
-  if (args[0] === '--sync' && [1, 3].includes(args.length) && (args.length === 1 || (args[1] === '--limit' && /^\d+$/.test(args[2] ?? '')))) {
+  if (args[0] === '--sync') {
+    // `--all` y `--limit N` son independientes y pueden combinarse. Se parsea a mano y se rechaza lo
+    // desconocido: un `--all` mal escrito que se ignorara en silencio sincronizaría solo lo relevante
+    // creyendo haber repoblado el tablero entero.
+    const rest = args.slice(1);
+    const all = rest.includes('--all');
+    const limitAt = rest.indexOf('--limit');
+    const limit = limitAt === -1 ? undefined : rest[limitAt + 1];
+    const consumed = (all ? 1 : 0) + (limitAt === -1 ? 0 : 2);
+    if (consumed !== rest.length || (limitAt !== -1 && !/^\d+$/.test(limit ?? ''))) { console.error('sync_arguments'); return 2; }
     try {
-      const result = await runNotionSync({ root, ...(args.length === 3 ? { limit: Number(args[2]) } : {}) });
+      const result = await runNotionSync({ root, ...(all ? { all } : {}), ...(limit !== undefined ? { limit: Number(limit) } : {}) });
       console.log(JSON.stringify({ counts: result.counts }));
       return result.counts.failed > 0 ? 7 : 0;
     } catch (error) {

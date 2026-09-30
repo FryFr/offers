@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { report, ingest } from '../src/pipeline.ts';
 import { parseAvailability, parseProfile } from '../src/contracts.ts';
-import { validateNotionConfig, planNotionSync as planSync, queryExistingPages, upsertNotionRecords as upsertSync, verifyNotionSchema, applyNotionSchema, DEFAULT_PACING_MS, type HttpTransport, type HttpRequest } from '../src/notion-sync.ts';
+import { validateNotionConfig, planNotionSync as planSync, queryExistingPages, upsertNotionRecords as upsertSync, verifyNotionSchema, applyNotionSchema, boardFields, DEFAULT_PACING_MS, type HttpTransport, type HttpRequest } from '../src/notion-sync.ts';
 const config = { enabled: true, dataSourceId: '12345678-1234-1234-1234-123456789012', externalKeyProperty: 'External key' };
 const now = new Date('2026-09-16T12:00:00Z');
 const evidence = { url: 'https://example.com/job', publishedAt: '2026-09-16', publicationEvidence: { url: 'https://example.com/job', excerpt: 'Published 2026-09-16', observedAt: now.toISOString() }, availability: { url: 'https://example.com/job', checkedAt: now.toISOString(), outcome: 'open' as const, httpStatus: 200, evidence: 'Active application form for this job' } };
@@ -193,7 +193,18 @@ test('el esquema se comprueba contra la base y dice QUÉ falta', async () => {
     assert.ok(!request.url.endsWith('/query'), 'query devuelve filas, no el esquema');
     return { status: 200, body: { object: 'data_source', properties } };
   };
-  assert.deepEqual(await verifyNotionSchema(config, withSchema(schema)), { ok: true, issues: [] });
+  // Las columnas DEL TABLERO se reportan aparte y NO afectan a `ok`: este módulo no las escribe
+  // nunca, así que su ausencia no puede romper una escritura. Sin esto, un tablero recién creado
+  // —sin `Estado` todavía— habría bloqueado el sync entero.
+  const limpio = await verifyNotionSchema(config, withSchema(schema));
+  assert.equal(limpio.ok, true, 'faltar Estado no bloquea el sync');
+  assert.deepEqual(limpio.issues, []);
+  assert.deepEqual(limpio.board.map(b => b.property), ['Estado', 'Applied at', 'Notes']);
+  // Y con las tres presentes, `board` queda vacío.
+  const conTablero = await verifyNotionSchema(config, withSchema({ ...schema,
+    Estado: { type: 'select' }, 'Applied at': { type: 'date' }, Notes: { type: 'rich_text' } }));
+  assert.deepEqual(conTablero.board, []);
+  assert.equal(conTablero.ok, true);
   // Añadir un nombre al código sin crearlo en Notion hace que CADA upsert devuelva 400: por eso
   // la comprobación nombra la propiedad exacta en vez de decir "algo no coincide".
   const { Relevance: _omitted, ...sinRelevance } = schema;
@@ -217,6 +228,9 @@ test('--apply-schema añade solo lo que falta y nunca cambia un tipo existente',
     'Recommendation priority': { type: 'number' }, Relevance: { type: 'number' }, 'Relevance tier': { type: 'select' },
     'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
     'Freelance review': { type: 'select' }, Origin: { type: 'rich_text' }, 'External key': { type: 'rich_text' },
+    // Las del tablero también: `--apply-schema` las crea aunque el sync no las escriba nunca, porque
+    // si no existieran habría que crearlas a mano con el tipo exacto y `--pull-status` fallaría.
+    Estado: { type: 'select' }, 'Applied at': { type: 'date' }, Notes: { type: 'rich_text' },
   } as Record<string, { type: string }>;
   const base = (properties: Record<string, { type: string }>) => {
     const patches: Record<string, unknown>[] = [];
@@ -413,4 +427,45 @@ test('Origin es dato del tablero y se envía aunque el contexto de cálculo est�
   // Y con el contexto encendido siguen viajando los tres.
   const conContexto = planNotionSync(records, { ...config, includeCalculationContext: true }).records[0]!.create.body.properties as Record<string, unknown>;
   for (const key of ['Origin', 'Explanation', 'Calculation assumptions']) assert.ok(key in conContexto, key);
+});
+
+test('el sync NUNCA nombra una columna del tablero, ni al crear ni al actualizar', async () => {
+  // Hoy esto está protegido por OMISIÓN: `properties()` solo construye las claves de `fields`. Basta
+  // que alguien añada un nombre a `fields` sin pensar para que el sync empiece a pisar lo que Juan
+  // escribió a mano. Esta prueba lo vuelve estructural.
+  const props = planNotionSync(records, config).records[0]!.create.body.properties as Record<string, unknown>;
+  const collision = Object.keys(boardFields).filter(field => field in props);
+  assert.deepEqual(collision, [], 'ninguna columna del tablero viaja en el plan');
+
+  // Y en una escritura REAL. Primero se deja que el sync CREE la página, para que la comparación use
+  // exactamente lo que él escribe; después se le añaden a mano las columnas del tablero y se vuelve a
+  // sincronizar. Construir la página a mano habría probado otra cosa: que mi fixture coincide.
+  let created: Record<string, unknown> | undefined;
+  const first = await upsertNotionRecords([records[0]!], config, async request => {
+    if (request.url.endsWith('/query')) return list([]);
+    created = (request.body as { properties: Record<string, unknown> }).properties;
+    return { status: 200, body: { object: 'page', id: '11111111-1111-1111-1111-111111111111' } };
+  });
+  assert.equal(first.created, 1);
+  assert.ok(created);
+
+  const page = {
+    object: 'page',
+    id: '11111111-1111-1111-1111-111111111111',
+    properties: {
+      ...created,
+      Estado: { select: { name: 'Postulada' } },
+      'Applied at': { date: { start: '2026-09-20' } },
+      Notes: { rich_text: [{ text: { content: 'Llame al reclutador.' } }] },
+    },
+  };
+  const sent: string[] = [];
+  const second = await upsertNotionRecords([records[0]!], config, async request => {
+    if (request.url.endsWith('/query')) return list([page]);
+    sent.push(request.url);
+    return { status: 200, body: { object: 'page', id: page.id } };
+  });
+  assert.equal(second.updated, 0, 'lo escrito a mano no provoca una escritura');
+  assert.equal(second.records[0]?.reason, 'unchanged');
+  assert.deepEqual(sent, [], 'no se envio ni una peticion de escritura');
 });
