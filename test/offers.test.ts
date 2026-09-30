@@ -389,9 +389,13 @@ test('migración conserva ejemplos históricos unknown; reingesta guarda evidenc
   assert.deepEqual(state.records[0]?.history, [original, closed]);
   assert.deepEqual(parseStore(state), state);
   assert.deepEqual(ingest(state, original), state);
+  // El historial conserva cada revisión tal como se observó, y sigue siendo evaluable a demanda.
+  // `report()` ya NO lo evalúa: con 25.136 registros eran ~125.000 `evaluate()` por corrida para
+  // un campo que nadie leía. Quien quiera el veredicto de una revisión vieja, la evalúa.
+  assert.deepEqual(state.records[0]?.history?.[0]?.availability, evidence.availability);
+  assert.ok(evaluate(state.records[0]!.history![1]!, profile, now).verification.reasons.includes('listing_closed'));
   const result = report(state, profile, now);
-  assert.ok(result.records[0]?.historicalEvaluations[1]?.evaluation.verification.reasons.includes('listing_closed'));
-  assert.deepEqual(result.records[0]?.historicalEvaluations[0]?.opportunity.availability, evidence.availability);
+  assert.equal('historicalEvaluations' in result.records[0]!, false, 'report no evalúa el historial');
 });
 
 test('una re-comprobación que solo mueve timestamps actualiza la oferta sin generar revisión', () => {

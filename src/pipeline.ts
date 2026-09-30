@@ -86,8 +86,11 @@ function withoutRunStamps(evaluation: ReturnType<typeof evaluate>) {
   return { ...rest, verification: stableVerification };
 }
 export function report(store: Store, profile: Profile, now: Date, options: { delivered?: ReadonlySet<string> } = {}) {
-  const records = store.records.map(r => ({ ...r, evaluation: evaluate(r.opportunity, profile, now),
-    historicalEvaluations: (r.history ?? []).map(opportunity => ({ opportunity, evaluation: evaluate(opportunity, profile, now) })) }));
+  // Solo se evalúa la revisión VIGENTE. Antes se evaluaban también las hasta cinco históricas de
+  // cada registro, y nadie leía el resultado: con 25.136 registros eso eran ~125.000 llamadas a
+  // `evaluate()` por corrida, cada una con su `relevance()` completo, para producir un campo sin
+  // un solo consumidor. El historial sigue en el store; lo que desaparece es evaluarlo.
+  const records = store.records.map(r => ({ ...r, evaluation: evaluate(r.opportunity, profile, now) }));
   const recommendations = recommend(records, { dailyTarget: profile.relevance.dailyTarget, ...(options.delivered ? { delivered: options.delivered } : {}) });
   const ranks = new Map(recommendations.map(r => [r.id, r]));
   return {
