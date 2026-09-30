@@ -93,3 +93,24 @@ test('registro UK: el cruce exige ubicación británica y nombre exacto, nunca d
   // Nombres genéricos quedan fuera aunque estén en el registro: dirían más del diccionario.
   assert.equal(matchesRegister('Global', 'London', registerIndex({ organisations: ['global'] })), false);
 });
+
+test('la cita se recorta a palabras enteras sin dejar de ser subcadena literal', () => {
+  // Leída en el tablero decía «l staff to be in one of our offices at le»: parecía un dato corrupto
+  // aunque la detección fuera correcta. La ventana es un corte por número de caracteres.
+  const description = `${'x'.repeat(40)} expect all staff to be in one of our offices at least 25% of the time. Visa sponsorship: We do sponsor visas! However, we aren't able to sponsor every role and every candidate. But if we make you an offer we will help.`;
+  const signal = sponsorshipFromDescription(description, '2026-09-30T00:00:00Z')!;
+  assert.equal(signal.status, 'stated');
+  // Ni empieza ni acaba a mitad de palabra.
+  assert.equal(/^\S*\s/.test(signal.evidence.quote) || !signal.evidence.quote.startsWith('x'), true);
+  assert.equal(signal.evidence.quote.startsWith('x'), false, 'el relleno cortado desaparece');
+  assert.match(signal.evidence.quote, /^\w/, 'empieza en palabra');
+  assert.match(signal.evidence.quote, /\w[.!]?$/, 'acaba en palabra');
+  // Y EL INVARIANTE que lo sostiene todo: sigue siendo subcadena literal de la descripción.
+  assert.ok(description.includes(signal.evidence.quote), 'la cita tiene que existir literalmente');
+
+  // El recorte se aplica SOLO a la cita, nunca a la ventana con la que se decide. Recortar antes de
+  // decidir perdía la negación de este caso y la oferta pasaba de `stated_none` a sin señal.
+  const negada = sponsorshipFromDescription('Applicants must be authorized to work in the United States without sponsorship', '2026-09-30T00:00:00Z')!;
+  assert.equal(negada.status, 'stated_none');
+  assert.ok('Applicants must be authorized to work in the United States without sponsorship'.includes(negada.evidence.quote));
+});

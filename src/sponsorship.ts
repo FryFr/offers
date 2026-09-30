@@ -53,6 +53,29 @@ const BEFORE = 120, AFTER = 160;
  * (not transactional) relationships… executive sponsors" se leía como negativa.
  */
 const NEGATION_REACH = 40;
+/**
+ * Recorta la ventana a palabras enteras SIN dejar de ser subcadena de la descripción.
+ *
+ * La ventana es un corte por número de caracteres, así que empieza y acaba a mitad de palabra: leída
+ * en el tablero decía «l staff to be in one of our offices at le», que parece un dato corrupto
+ * aunque la detección fuera correcta. Recortar hasta el espacio más cercano lo vuelve legible y
+ * mantiene el invariante que sostiene todo esto —`parseOpportunity` exige que la cita aparezca
+ * LITERALMENTE en la descripción—, porque una subcadena de una subcadena sigue siéndolo.
+ *
+ * Se aplica SOLO a la cita que se guarda, nunca a la ventana con la que se decide. Recortar antes de
+ * decidir destruía señales reales: «Applicants must be authorized to work in the United States
+ * w[ithout sponsorship]» perdía la negación al cortar la última palabra y la oferta pasaba de
+ * `stated_none` a sin señal. Detectar sobre el texto completo, presentar recortado.
+ *
+ * Si el recorte se comiera la mención que disparó la ventana, se devuelve la ventana entera: la
+ * legibilidad no puede costar la evidencia.
+ */
+function toWholeWords(window: string, mention: string): string {
+  const first = window.search(/\s/);
+  const last = window.search(/\s\S*$/);
+  const trimmed = window.slice(first === -1 ? 0 : first + 1, last === -1 ? window.length : last).trim();
+  return trimmed.includes(mention) ? trimmed : window;
+}
 /** Menciones examinadas por descripción: más allá, el texto ya habló. */
 const MAX_MENTIONS = 12;
 
@@ -66,7 +89,7 @@ const scopeOf = (window: string) => SCOPE_MARKERS.find(([pattern]) => pattern.te
  */
 export function sponsorshipFromDescription(description: string | undefined, observedAt: string): SponsorshipSignal | undefined {
   if (!description) return undefined;
-  let negative: string | undefined;
+  let negative: { window: string; mention: string } | undefined;
   let seen = 0;
   const pattern = new RegExp(IMMIGRATION.source, 'gi');
   for (const match of description.matchAll(pattern)) {
@@ -79,10 +102,10 @@ export function sponsorshipFromDescription(description: string | undefined, obse
     // "we aren't able to sponsor" no se cuela por contener "able to sponsor".
     const affirmed = AFFIRMED.exec(window);
     if (affirmed && !NEGATED.test(window.slice(Math.max(0, affirmed.index - NEGATION_REACH), affirmed.index))) {
-      return { status: 'stated', scope: scopeOf(window), evidence: { kind: 'description_phrase', source: 'affirms_sponsorship_near_mention', quote: window, observedAt } };
+      return { status: 'stated', scope: scopeOf(window), evidence: { kind: 'description_phrase', source: 'affirms_sponsorship_near_mention', quote: toWholeWords(window, match[0]), observedAt } };
     }
-    if (DENIED.test(window)) negative ??= window;
+    if (DENIED.test(window)) negative ??= { window, mention: match[0] };
   }
   if (!negative) return undefined;
-  return { status: 'stated_none', scope: scopeOf(negative), evidence: { kind: 'description_phrase', source: 'denies_sponsorship_near_mention', quote: negative, observedAt } };
+  return { status: 'stated_none', scope: scopeOf(negative.window), evidence: { kind: 'description_phrase', source: 'denies_sponsorship_near_mention', quote: toWholeWords(negative.window, negative.mention), observedAt } };
 }
