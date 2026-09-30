@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sincronización con Notion (`bin/offers --sync`), cada hora al minuto :20.
+     Plantilla versionada: el original vive en ~/Library/LaunchAgents, que no se versiona.
+
+     ÚNICO agente que se invoca por `bin/offers` y no por `node` directo, y es a propósito: este
+     comando necesita NOTION_API_KEY, y launchd NO arranca un shell de login —ni ~/.zshrc ni
+     ~/.zprofile se leen—, así que una variable exportada en la terminal no llega aquí. `bin/offers`
+     es quien carga ~/.config/offers/env y quien rechaza ese archivo si no tiene permisos 600.
+
+     El minuto :20 lo separa del ciclo horario, que corre al :00. Ya no compiten por el lock del
+     checkpoint —el sync solo lo toma unos segundos para leer— pero solaparlos no aporta nada y
+     escalona la carga de red.
+
+     Escribe SOLO lo relevante: `strong`, `possible`, y lo que ya salió en un digest. Para repoblar
+     el tablero entero hace falta `--sync --all` a mano, que son miles de peticiones.
+
+     Códigos de salida que importan en el log: 3 lock ocupado (otro sync corriendo), 5 Notion sin
+     configurar o sin esquema verificado, 6 checkpoint vencido, 7 sincronizado con registros
+     fallidos, 8 el esquema de Notion no coincide.
+
+     Los secretos NO van aquí: este archivo está en git. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.juansilva.offers-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/juansilva/Documents/offers/bin/offers</string>
+    <string>--sync</string>
+  </array>
+  <key>WorkingDirectory</key>   <string>/Users/juansilva/Documents/offers</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>           <integer>20</integer>
+  </dict>
+  <key>RunAtLoad</key>          <false/>
+  <key>StandardOutPath</key>    <string>/Users/juansilva/Documents/offers/data/logs/sync.out.log</string>
+  <key>StandardErrorPath</key>  <string>/Users/juansilva/Documents/offers/data/logs/sync.err.log</string>
+  <key>ProcessType</key>        <string>Background</string>
+  <key>LowPriorityIO</key>      <true/>
+  <key>Nice</key>               <integer>5</integer>
+</dict>
+</plist>

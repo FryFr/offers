@@ -2,6 +2,7 @@ import type { report } from './pipeline.ts';
 import { identity } from './pipeline.ts';
 import { parseAvailability, parseOpportunity, type AvailabilityEvidence, type Opportunity } from './contracts.ts';
 import { verification, PUBLICATION_WINDOW_DAYS, type Verification } from './evaluate.ts';
+import { appendChildrenRequest, readChildrenRequest } from './notion-body.ts';
 
 type Projection = ReturnType<typeof report>['notion']['records'][number];
 export type NotionRecord = Pick<Projection, 'externalKey' | 'properties'> & { opportunity?: Opportunity };
@@ -210,8 +211,29 @@ export function compactNotionPlan(plan: {
       ? { externalKey: b.externalKey, reason: b.reason }
       : { externalKey: b.externalKey, reasons: b.verification.reasons }) };
 }
-function createRequest(record: NotionRecord, config: NotionConfig) {
-  return request(config, 'POST', 'pages', { parent: config.dataSourceId ? { type: 'data_source_id', data_source_id: config.dataSourceId } : { database_id: config.databaseId }, properties: properties(record, config) });
+/**
+ * Escribe el cuerpo solo si la página está VACÍA. Devuelve qué pasó.
+ *
+ * Nunca reescribe. Una página con cualquier hijo se deja intacta, porque no hay forma de distinguir
+ * un cuerpo que este módulo escribió de uno que Juan amplió, y equivocarse en esa distinción borra
+ * trabajo suyo. Si algún día hace falta refrescar el cuerpo, será una decisión explícita con su
+ * propio comando, no un efecto secundario del sync.
+ */
+export async function ensurePageBody(pageId: string, children: readonly Record<string, unknown>[], transport: HttpTransport): Promise<'written' | 'already_present' | 'empty_body'> {
+  if (!children.length) return 'empty_body';
+  const existing = await transport(readChildrenRequest(pageId));
+  if (existing.status !== 200) throw new Error('notion_body_unreadable');
+  const results = (existing.body as { results?: unknown[] } | null)?.results;
+  if (!Array.isArray(results)) throw new Error('notion_body_unreadable');
+  if (results.length) return 'already_present';
+  const response = await transport(appendChildrenRequest(pageId, children));
+  if (response.status !== 200) throw new Error('notion_body_write_failed');
+  return 'written';
+}
+
+function createRequest(record: NotionRecord, config: NotionConfig, children?: readonly Record<string, unknown>[]) {
+  return request(config, 'POST', 'pages', { parent: config.dataSourceId ? { type: 'data_source_id', data_source_id: config.dataSourceId } : { database_id: config.databaseId },
+    properties: properties(record, config), ...(children?.length ? { children } : {}) });
 }
 async function confirmed(transport: HttpTransport, req: HttpRequest): Promise<Record<string, unknown>> {
   let response: HttpResponse;
@@ -243,9 +265,21 @@ function comparable(value: unknown): unknown {
   if ('url' in p) return { url: p.url };
   return null;
 }
-export interface SyncResult { created: number; updated: number; skipped: number; failed: number; records: { index: number; status: 'created' | 'updated' | 'skipped' | 'failed'; reason?: string; verification?: Verification; opportunity?: Opportunity }[] }
+/** `bodies` cuenta qué pasó con el cuerpo de cada página, aparte de las columnas: una página cuyo
+ *  cuerpo ya existía es `already_present`, no un fallo. */
+export interface SyncResult { created: number; updated: number; skipped: number; failed: number; bodies: { written: number; already_present: number; empty_body: number; failed: number }; records: { index: number; status: 'created' | 'updated' | 'skipped' | 'failed'; reason?: string; verification?: Verification; opportunity?: Opportunity }[] }
 export interface SyncOptions {
   now?: () => Date;
+  /**
+   * Cuerpo de la página por clave externa. Opt-in: si no se pasa, el sync escribe solo columnas,
+   * exactamente como antes.
+   *
+   * Al CREAR, los bloques viajan en el mismo POST /v1/pages, que Notion admite hasta 100 hijos y no
+   * cuesta una petición extra. En una página EXISTENTE se consulta si tiene hijos y solo se escribe
+   * si está vacía: nunca se reescribe, porque no hay forma de distinguir el cuerpo que escribió este
+   * módulo del que Juan amplió, y equivocarse ahí borra trabajo suyo.
+   */
+  body?: (externalKey: string) => readonly Record<string, unknown>[] | undefined;
   revalidate?: (opportunity: Opportunity, signal: AbortSignal) => Promise<AvailabilityEvidence>;
   timeoutMs?: number;
   /** Tope de registros a procesar. Los que sobran se reportan `skipped`/`batch_limit`, no se pierden. */
@@ -294,7 +328,8 @@ export async function upsertNotionRecords(records: readonly NotionRecord[], valu
   // proceso se cierra en mitad de la pausa y el lote queda a medio escribir. Aquí la espera ES
   // el trabajo, no una tarea de fondo.
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); }));
-  const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, records: [] };
+  const bodies = { written: 0, already_present: 0, empty_body: 0, failed: 0 };
+  const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, bodies, records: [] };
   const seen = new Set<string>();
   let attempted = 0;
   // Registros que de verdad llamaron a Notion; solo entre ellos hace falta el ritmo.
@@ -336,10 +371,17 @@ export async function upsertNotionRecords(records: readonly NotionRecord[], valu
         if (checked.status !== 'verified') { reason = 'verification_blocked'; return; }
         if (page && Object.entries(props).every(([key, v]) => JSON.stringify(comparable(v)) === JSON.stringify(comparable(page.properties[key])))) reason = 'unchanged';
         else {
-          const req = page ? request(config, 'PATCH', `pages/${encodeURIComponent(page.id)}`, { properties: props }) : createRequest(candidate, config);
+          const children = options.body?.(record.externalKey);
+          const req = page ? request(config, 'PATCH', `pages/${encodeURIComponent(page.id)}`, { properties: props })
+            : createRequest(candidate, config, children);
           const response = await confirmed(transport, req);
           if (response.object !== 'page' || typeof response.id !== 'string' || !response.id || (page && response.id !== page.id)) throw new Error('invalid_response');
           status = page ? 'updated' : 'created';
+          // En una página que ya existía, el cuerpo va aparte y solo si está vacía. Un fallo aquí NO
+          // deshace la escritura de columnas, que ya está confirmada: se reporta y se sigue.
+          if (page && children?.length) {
+            try { bodies[await ensurePageBody(page.id, children, transport)]++; } catch { bodies.failed++; }
+          } else if (!page && children?.length) bodies.written++;
         }
       });
     } catch (error) {

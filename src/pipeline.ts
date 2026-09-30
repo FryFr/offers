@@ -8,7 +8,9 @@ export interface Store { version: 1; records: RecordEntry[] }
 /** Revisiones anteriores conservadas por registro. Lecturas antiguas no se reconstruyen desde el store. */
 export const MAX_HISTORY = 5;
 const canonicalText = (s: string) => s.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
-const notionRichText = (values: readonly string[]) => values.flatMap(value => {
+/** Trocea a los 2000 caracteres que Notion admite por bloque de texto. Exportado para que el cuerpo
+ *  de la página no escriba un segundo troceador con el mismo límite y distinto redondeo. */
+export const notionRichText = (values: readonly string[]) => values.flatMap(value => {
   const chunks: { text: { content: string } }[] = [];
   for (let start = 0; start < value.length; start += 2000) chunks.push({ text: { content: value.slice(start, start + 2000) } });
   return chunks;

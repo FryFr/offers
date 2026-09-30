@@ -12,6 +12,18 @@ macOS vive en `~/Library/LaunchAgents`, que no se versiona ni se respalda.
 | `com.juansilva.offers-cycle` | `--dry-run` | cada hora | disponible |
 | `com.juansilva.offers-digest` | `--digest` | diaria 06:00 | disponible |
 | `com.juansilva.offers-sponsors` | `--refresh-sponsors` | lunes 05:00 | disponible |
+| `com.juansilva.offers-sync` | `--sync` | cada hora al :20 | disponible |
+
+**El agente de sync es el único que se invoca por `bin/offers`** y no por `node` directo. No es una
+inconsistencia: es el único comando que necesita `NOTION_API_KEY`, y launchd no arranca un shell de
+login, así que ni `~/.zshrc` ni `~/.zprofile` se leen y una variable exportada en la terminal no
+llega. `bin/offers` es quien carga `~/.config/offers/env` y quien **rechaza** ese archivo si no tiene
+permisos 600 o 400.
+
+Corre al minuto :20 para no solaparse con el ciclo del :00. Ya no compiten por el lock del
+checkpoint —el sync solo lo toma unos segundos, para leer— pero escalonar la carga de red no cuesta
+nada. Y escribe solo lo relevante: repoblar el tablero entero exige `--sync --all` a mano, que son
+miles de peticiones.
 
 Solo se versionan agentes cuyo comando ya existe: agendar un subcomando que aún no está
 implementado produce un agente que falla en silencio cada hora.

@@ -11,6 +11,7 @@ import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from
 import { createClaudeEnricher } from './claude-enrichment.ts';
 import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
+import { pageBody } from './notion-body.ts';
 import type { Provenance } from './source-adapters.ts';
 import { fetchRegister, registerIndex, type SponsorRegister } from './uk-sponsors.ts';
 import type { SafeReadOptions } from './safe-http.ts';
@@ -283,7 +284,7 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
   const health = await sourceHealth(root, now);
   if (!health.healthy) throw new Error('checkpoint_unhealthy');
   // Lectura del checkpoint BAJO SU LOCK, y solo eso: son segundos, no los minutos de la red.
-  const { records } = await withMailLock(join(data, 'source-cycle.json'), async () => {
+  const { records, bodies } = await withMailLock(join(data, 'source-cycle.json'), async () => {
     const checkpoint = await json(join(data, 'source-cycle.json')) as { store?: unknown };
     const store = parseStore(checkpoint.store);
     const profile = parseProfile(await json(join(root, 'examples/profile.json')));
@@ -295,7 +296,11 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
     const relevant = new Set(snapshot.records
       .filter(r => ['strong', 'possible'].includes(r.evaluation.relevance.tier) || delivered.has(r.id))
       .map(r => r.id));
-    return { records: options.all === true ? snapshot.notion.records : snapshot.notion.records.filter(r => relevant.has(r.externalKey)) };
+    // El cuerpo se arma AQUÍ, dentro del lock de lectura, porque necesita la evaluación completa del
+    // registro. Después el sync solo lo consulta por clave: la fase de red no vuelve al checkpoint.
+    const bodies = new Map(snapshot.records.map(r => [r.id, pageBody({ opportunity: r.opportunity, evaluation: r.evaluation, profile,
+      ...(snapshot.recommendations.find(x => x.id === r.id)?.selectionReason ? { selectionReason: snapshot.recommendations.find(x => x.id === r.id)!.selectionReason } : {}) })]));
+    return { bodies, records: options.all === true ? snapshot.notion.records : snapshot.notion.records.filter(r => relevant.has(r.externalKey)) };
   });
   return withMailLock(join(data, 'notion-sync.json'), async () => {
     const transport = options.dependencies?.transport ?? createNotionTransport(fetch, options.dependencies?.env ?? process.env);
@@ -304,7 +309,7 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
     // petición, fallar después cuesta cientos y deja la base a medio escribir.
     const schema = await verifyNotionSchema(config, transport);
     if (!schema.ok) throw new SchemaMismatch(schema.issues);
-    const result = await upsertNotionRecords(records, config, transport, { now: () => now, ...(options.limit !== undefined ? { limit: options.limit } : {}) });
+    const result = await upsertNotionRecords(records, config, transport, { now: () => now, body: key => bodies.get(key), ...(options.limit !== undefined ? { limit: options.limit } : {}) });
     // Los fallos se guardan con su motivo y su clave. Un conteo suelto ("failed: 2") deja sin
     // forma de saber QUÉ falló ni de volver a esos registros: hay que recorrer 5.000 otra vez
     // para averiguarlo. Se acotan para que un fallo masivo no infle el archivo.
@@ -312,6 +317,7 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
       .map(record => ({ index: record.index, reason: record.reason ?? 'unknown', externalKey: records[record.index]?.externalKey }));
     const summary = { version: 1 as const, generatedAt: now.toISOString(),
       counts: { created: result.created, updated: result.updated, skipped: result.skipped, failed: result.failed, total: result.records.length },
+      bodies: result.bodies,
       ...(failures.length ? { failures } : {}) };
     await atomicMailWrite(join(data, 'notion-sync.json'), summary);
     return summary;

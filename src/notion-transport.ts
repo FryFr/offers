@@ -11,8 +11,17 @@ export function createNotionTransport(fetcher: typeof fetch = fetch, env: NodeJS
     // verificar el esquema por mucho que se le pida.
     const writePath = /^\/v1\/(?:pages(?:\/[a-f\d-]+)?|(?:data_sources|databases)\/[a-f\d-]+\/query)$/i.test(url.pathname);
     const readPath = /^\/v1\/(?:data_sources|databases)\/[a-f\d-]+$/i.test(url.pathname);
+    /**
+     * Los hijos de una página: leerlos y AÑADIR, nunca borrar.
+     *
+     * Sin DELETE a propósito. Borrar bloques borraría lo que Juan escribió a mano dentro de la
+     * página, y la única forma de "reescribir" el cuerpo sería borrar primero. Al no existir el
+     * método, ese camino no puede tomarse ni por error: el cuerpo se escribe una vez, cuando la
+     * página está vacía, y después es suyo.
+     */
+    const blockPath = /^\/v1\/blocks\/[a-f\d-]+\/children$/i.test(url.pathname);
     // La ruta de la data source admite leer el esquema (GET) y añadirle columnas (PATCH).
-    const allowed = writePath ? ['POST', 'PATCH'] : readPath ? ['GET', 'PATCH'] : [];
+    const allowed = writePath ? ['POST', 'PATCH'] : readPath ? ['GET', 'PATCH'] : blockPath ? ['GET', 'PATCH'] : [];
     if (url.origin !== 'https://api.notion.com' || url.username || url.password || url.search || url.hash
       || !allowed.includes(request.method)) throw new Error('notion_request_rejected');
     try {
