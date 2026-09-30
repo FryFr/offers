@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { parseProfile } from './contracts.ts';
 import { parseLedger, deliveredIds, recordDelivery } from './delivery-ledger.ts';
 import { renderDigest } from './digest.ts';
-import { parseStore, report } from './pipeline.ts';
+import { parseStore, pruneStore, report } from './pipeline.ts';
 import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts';
 import { parseRegistry } from './source-registry.ts';
 import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from './multi-source.ts';
@@ -126,6 +126,33 @@ export async function refreshSponsors(options: { root?: string; now?: Date; depe
  * `profilePath` permite apuntar a otro perfil sin tocar el del repositorio, que es lo que hace
  * medible un cambio de perfil antes de adoptarlo.
  */
+/**
+ * Informa qué purgaría la retención, y opcionalmente la aplica.
+ *
+ * Con `apply: false` NO escribe nada: es el comando que se mira antes de encender el que borra.
+ * Lo que se pierde al aplicar es irrecuperable y hay que nombrarlo: revisiones históricas de
+ * ofertas que ninguna fuente lista ya, y el `observedAt` de la primera observación en `provenance`.
+ */
+export async function vacuumCheckpoint(options: { root?: string; now?: Date; apply?: boolean; graceDays?: number } = {}) {
+  const root = options.root ?? repositoryRoot, data = join(root, 'data');
+  const now = options.now ?? new Date();
+  const path = join(data, 'source-cycle.json');
+  const raw = await readFile(path, 'utf8');
+  const checkpoint = JSON.parse(raw) as Record<string, unknown> & { store?: unknown; provenance?: Record<string, unknown> };
+  const profile = parseProfile(await json(join(root, 'examples/profile.json')));
+  const pruned = pruneStore(parseStore(checkpoint.store), profile, now, options.graceDays);
+  // La procedencia se poda a las URLs de los registros VIVOS. `runSources` copia todas las claves
+  // previas y nunca borra una, así que acumula la de cada oferta que alguna vez se vio.
+  const live = new Set(pruned.store.records.map(r => r.opportunity.url).filter(Boolean));
+  const provenanceBefore = Object.keys(checkpoint.provenance ?? {}).length;
+  const provenance = Object.fromEntries(Object.entries(checkpoint.provenance ?? {}).filter(([url]) => live.has(url)));
+  const next = { ...checkpoint, store: pruned.store, provenance };
+  const bytesAfter = JSON.stringify(next, null, 2).length + 1;
+  const report = { ...pruned.report, provenanceKeys: provenanceBefore, provenanceKept: Object.keys(provenance).length,
+    bytesBefore: raw.length, bytesAfter, applied: options.apply === true };
+  if (options.apply === true) await atomicMailWrite(path, next);
+  return report;
+}
 export async function computeDigest(options: { root?: string; now?: Date; profilePath?: string } = {}) {
   const root = options.root ?? repositoryRoot, data = join(root, 'data');
   const now = options.now ?? new Date();
@@ -279,6 +306,7 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
   if (args.length === 1 && args[0] === '--help') {
     console.log('bin/offers --dry-run [--enrich-model MODEL]   recolecta y persiste el checkpoint\n'
       + 'bin/offers --digest                          entrega el corte del dia (solo lectura)\n'
+      + 'bin/offers --vacuum [--dry-run|--apply]      informa (o aplica) la purga del checkpoint\n'
       + 'bin/offers --probe-source ADAPTADOR TOKEN     sondea un board antes de anadirlo (solo lectura)\n'
       + 'bin/offers --digest-preview [--now TS] [--profile RUTA]\n'
       + '                                             imprime el corte SIN anotarlo: ni ledger, ni metricas\n'
@@ -310,6 +338,21 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       const message = error instanceof Error ? error.message : '';
       if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
       console.error(message === 'ledger_invalid' ? 'ledger_invalid' : 'digest_failed'); return 4;
+    }
+  }
+  if (args[0] === '--vacuum') {
+    // `--dry-run` es la forma SEGURA y hay que pedir `--apply` para borrar. Al revés —borrar por
+    // omisión— habría convertido un comando de inspección en una pérdida de datos por tipear mal.
+    const apply = args.length === 2 && args[1] === '--apply';
+    if (!(args.length === 1 || apply || (args.length === 2 && args[1] === '--dry-run'))) { console.error('vacuum_arguments'); return 2; }
+    try {
+      const report = await withMailLock(join(root, 'data/source-cycle.json'), () => vacuumCheckpoint({ root, apply }));
+      console.log(JSON.stringify(report));
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
+      console.error(message || 'vacuum_failed'); return 4;
     }
   }
   if (args[0] === '--probe-source') {

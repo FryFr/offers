@@ -560,3 +560,52 @@ test('la descripción se acota en todos los adaptadores, no solo en greenhouse',
   assert.equal(conCita.jobs.length, 1, 'la fila no se rechaza: el detector ve el mismo texto acotado');
   assert.equal(conCita.jobs[0]!.opportunity.sponsorship, undefined, 'la mención quedó fuera del tope y no se afirma');
 });
+
+test('--vacuum informa sin escribir y solo borra con --apply', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'offers-vacuum-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), '{}');
+    const fresh = new Date().toISOString();
+    const stamp = (url: string, publishedAt: string) => ({ title: 'Developer', company: 'Acme', skills: [], url, publishedAt,
+      publicationEvidence: { url, excerpt: 'Published', observedAt: fresh },
+      availability: { url, checkedAt: fresh, outcome: 'open' as const, httpStatus: 200, evidence: 'listing' } });
+    const viva = stamp('https://example.com/viva', fresh.slice(0, 10));
+    const vieja = stamp('https://example.com/vieja', '2026-01-15');
+    const store = ingest({ version: 1, records: [] }, [viva, vieja]);
+    // `provenance` con una clave huérfana: ninguna oferta viva la reclama.
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false,
+      generatedAt: fresh, store, counts: {}, provenance: { [viva.url]: [], [vieja.url]: [], 'https://example.com/fantasma': [] } }, null, 2));
+    const before = await readFile(join(root, 'data/source-cycle.json'), 'utf8');
+
+    const out: string[] = [];
+    const log = console.log;
+    console.log = (line: string) => { out.push(line); };
+    try { assert.equal(await sourcesMain(['--vacuum', '--dry-run'], root), 0); } finally { console.log = log; }
+    const dry = JSON.parse(out.at(-1)!);
+    assert.equal(dry.records, 2);
+    assert.equal(dry.wouldRemove, 1, 'la publicada en enero no puede volver a un corte');
+    assert.equal(dry.applied, false);
+    assert.equal(dry.provenanceKeys, 3);
+    assert.equal(dry.provenanceKept, 1, 'solo la URL de la oferta viva');
+    assert.ok(dry.bytesAfter < dry.bytesBefore);
+    // LA propiedad: el archivo no se tocó. Byte a byte.
+    assert.equal(await readFile(join(root, 'data/source-cycle.json'), 'utf8'), before, '--dry-run no escribe');
+
+    out.length = 0;
+    console.log = (line: string) => { out.push(line); };
+    try { assert.equal(await sourcesMain(['--vacuum', '--apply'], root), 0); } finally { console.log = log; }
+    assert.equal(JSON.parse(out.at(-1)!).applied, true);
+    const after = JSON.parse(await readFile(join(root, 'data/source-cycle.json'), 'utf8'));
+    assert.equal(after.store.records.length, 1);
+    assert.deepEqual(Object.keys(after.provenance), [viva.url]);
+    assert.equal(after.generatedAt, fresh, 'la purga no reescribe el resto del checkpoint');
+    // Idempotente: una segunda pasada no encuentra nada.
+    out.length = 0;
+    console.log = (line: string) => { out.push(line); };
+    try { assert.equal(await sourcesMain(['--vacuum', '--apply'], root), 0); } finally { console.log = log; }
+    assert.equal(JSON.parse(out.at(-1)!).wouldRemove, 0);
+    // Un argumento desconocido se rechaza en vez de interpretarse como "borra".
+    assert.equal(await sourcesMain(['--vacuum', '--force'], root), 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

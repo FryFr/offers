@@ -106,6 +106,44 @@ function withoutRunStamps(evaluation: ReturnType<typeof evaluate>) {
   const { validUntil: _until, ...stableVerification } = verification;
   return { ...rest, verification: stableVerification };
 }
+/** Días de gracia tras `validUntil` antes de olvidar un registro. */
+export const STORE_GRACE_DAYS = 7;
+export interface PruneReport {
+  records: number;
+  kept: number;
+  wouldRemove: number;
+  byReason: Record<string, number>;
+}
+/**
+ * Olvida del store lo que ya no puede volver a recomendarse. Función pura: no escribe nada.
+ *
+ * NO vive dentro de `ingest`. Esa función no recibe reloj, `cli.ts` la usa para entrada manual
+ * donde un `publishedAt` viejo es legítimo, y mezclar retención con deduplicación haría imposible
+ * probar cada una por separado. Mismo precedente que `pruneLedger`.
+ *
+ * Reutiliza la señal que YA existe: `verification().validUntil`, que es el mínimo entre el TTL de
+ * la comprobación, el fin de la ventana de publicación y el vencimiento declarado. Si esa fecha
+ * pasó hace más de `graceDays`, el registro no puede volver a entrar a un corte: la ventana de
+ * publicación es irreversible, así que `stale` no se cura.
+ *
+ * Un registro **sin `availability` se conserva siempre**: no tiene `validUntil`, y sin señal
+ * borrar a ciegas es peor que pagar el espacio. Eso incluye las ofertas de entrada manual.
+ */
+export function pruneStore(store: Store, profile: Profile, now: Date, graceDays = STORE_GRACE_DAYS): { store: Store; report: PruneReport } {
+  if (!Number.isSafeInteger(graceDays) || graceDays < 0) throw new Error('graceDays inválido');
+  const cutoff = now.getTime() - graceDays * 86_400_000;
+  const byReason: Record<string, number> = Object.create(null);
+  const kept = store.records.filter(record => {
+    const { status, validUntil } = evaluate(record.opportunity, profile, now).verification;
+    // Sin `validUntil` no hay señal de caducidad: se conserva.
+    if (validUntil === null) { byReason.no_expiry_signal = (byReason.no_expiry_signal ?? 0) + 1; return true; }
+    if (Date.parse(validUntil) >= cutoff) { byReason.still_valid = (byReason.still_valid ?? 0) + 1; return true; }
+    byReason[`removed_${status}`] = (byReason[`removed_${status}`] ?? 0) + 1;
+    return false;
+  });
+  return { store: { version: 1, records: kept },
+    report: { records: store.records.length, kept: kept.length, wouldRemove: store.records.length - kept.length, byReason } };
+}
 export function report(store: Store, profile: Profile, now: Date, options: { delivered?: ReadonlySet<string> } = {}) {
   // Solo se evalúa la revisión VIGENTE. Antes se evaluaban también las hasta cinco históricas de
   // cada registro, y nadie leía el resultado: con 25.136 registros eso eran ~125.000 llamadas a

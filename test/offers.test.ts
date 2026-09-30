@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { normalize, classify, expiration, evaluate, verification, PUBLICATION_WINDOW_DAYS } from '../src/evaluate.ts';
-import { identity, ingest, parseStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
+import { identity, ingest, parseStore, pruneStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
 import { FX, FX_MAX_AGE_DAYS, toUsd } from '../src/fx.ts';
 
 // El perfil de las pruebas DECLARA el rol que busca. Antes no lo hacía y sus ofertas entraban al
@@ -460,4 +460,43 @@ test('una revisión cuya cita de patrocinio vive en la descripción la conserva 
   const ahorrada = ingest(ingest(empty(), normal), normalMovida);
   assert.equal('description' in ahorrada.records[0]!.history![0]!, false, 'sin evidencia que sostener, se ahorra');
   assert.deepEqual(parseStore(ahorrada), ahorrada);
+});
+
+test('la purga conserva lo vigente y olvida lo caducado', () => {
+  const fresh = verifiedOpportunity({ title: 'Vigente' });
+  // Publicada hace 40 días: fuera de la ventana de 7, `stale` irreversible. No puede volver a un corte.
+  const vieja = verifiedOpportunity({ title: 'Vieja', publishedAt: '2026-08-07',
+    publicationEvidence: { ...evidence.publicationEvidence, excerpt: 'Published 2026-08-07' } });
+  // Comprobada hace 10 días: el TTL de 24 h venció y `validUntil` quedó muy atrás.
+  const rancia = verifiedOpportunity({ title: 'Rancia',
+    availability: { ...evidence.availability, checkedAt: '2026-09-06T12:00:00Z' } });
+  // Sin `availability` no hay `validUntil`: sin señal, se conserva.
+  const sinSenal = verifiedOpportunity({ title: 'Sin senal', availability: undefined });
+
+  const state = ingest(empty(), [fresh, vieja, rancia, sinSenal]);
+  assert.equal(state.records.length, 4);
+  const { store, report: r } = pruneStore(state, profile, now);
+  const titulos = store.records.map(x => x.opportunity.title).sort();
+  assert.deepEqual(titulos, ['Sin senal', 'Vigente'], 'sobreviven la vigente y la que no tiene señal');
+  assert.equal(r.records, 4);
+  assert.equal(r.wouldRemove, 2);
+  assert.equal(r.byReason.no_expiry_signal, 1);
+  assert.equal(r.byReason.still_valid, 1);
+  // El motivo nombra el estado con el que se fue, no solo que se fue.
+  assert.equal(Object.keys(r.byReason).filter(k => k.startsWith('removed_')).length > 0, true);
+  // Y el store purgado sigue siendo un store válido.
+  assert.deepEqual(parseStore(store), store);
+});
+
+test('la purga es idempotente y no borra nada en la segunda pasada', () => {
+  const state = ingest(empty(), [verifiedOpportunity({ title: 'Vigente' }),
+    verifiedOpportunity({ title: 'Vieja', publishedAt: '2026-08-07', publicationEvidence: { ...evidence.publicationEvidence, excerpt: 'old' } })]);
+  const first = pruneStore(state, profile, now);
+  const second = pruneStore(first.store, profile, now);
+  assert.equal(first.report.wouldRemove, 1);
+  assert.equal(second.report.wouldRemove, 0, 'la segunda pasada no encuentra nada que borrar');
+  assert.deepEqual(second.store, first.store);
+  // Los días de gracia son un parámetro, no una constante incrustada, y se validan.
+  assert.equal(pruneStore(state, profile, now, 0).report.wouldRemove >= 1, true);
+  for (const invalid of [-1, 1.5, Number.NaN]) assert.throws(() => pruneStore(state, profile, now, invalid), /graceDays/);
 });
