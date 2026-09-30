@@ -2,8 +2,15 @@
 <!-- Lectura del tablero (`bin/offers --pull-status`), diaria 06:40 hora local.
      Plantilla versionada: el original vive en ~/Library/LaunchAgents, que no se versiona.
 
-     Va por `bin/offers` porque necesita NOTION_API_KEY, igual que el sync: launchd no arranca un
-     shell de login, así que el secreto solo llega por `~/.config/offers/env`.
+     Carga NOTION_API_KEY antes de ejecutar, porque launchd no arranca un shell de login: ni
+     ~/.zshrc ni ~/.zprofile se leen y una variable exportada en la terminal no llega aquí.
+
+     Y lo hace con `sh -c` en línea, NO invocando `bin/offers`. Medido el 2026-09-30: launchd no
+     puede EJECUTAR un script que viva dentro de ~/Documents —macOS lo bloquea con "Operation not
+     permitted"— mientras que ejecutar `node`, que vive fuera, y pasarle una ruta de Documents sí
+     funciona, que es por lo que los otros tres agentes llevan meses corriendo. Aquí nada de lo que
+     se ejecuta vive en Documents: `/bin/sh`, el archivo de secretos en ~/.config y `node` en
+     ~/.local/bin. El comportamiento es el mismo que `bin/offers` para el uso interactivo.
 
      A las 06:40, después del digest (06:00) y del sync (:20): así lee un tablero que ya refleja el
      corte del día. Solo LEE de Notion; lo único que escribe es data/tracking.json.
@@ -15,16 +22,21 @@
      un fallo transitorio: hay que decidir a qué escalón del embudo corresponde y añadirlo a
      src/notion-board.ts. Traducirlo a ojo inventaría el dato con el que se mide todo esto.
 
+     SIN `WorkingDirectory`: con el directorio de trabajo dentro de ~/Documents, `/bin/sh` no puede
+     hacer getcwd bajo las protecciones de macOS y escribía un aviso en stderr en CADA corrida. El
+     comando no lo necesita —`source-cli.ts` deriva la raíz del repositorio de `import.meta.url`, no
+     del directorio actual— y un aviso cada hora entrena a ignorar el log.
+
      Los secretos NO van aquí: este archivo está en git. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>              <string>com.juansilva.offers-status</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/juansilva/Documents/offers/bin/offers</string>
-    <string>--pull-status</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . "$HOME/.config/offers/env"; set +a; exec /Users/juansilva/.local/bin/node /Users/juansilva/Documents/offers/src/source-cli.ts --pull-status</string>
   </array>
-  <key>WorkingDirectory</key>   <string>/Users/juansilva/Documents/offers</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>             <integer>6</integer>

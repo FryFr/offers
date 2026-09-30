@@ -21,7 +21,26 @@ login, así que ni `~/.zshrc` ni `~/.zprofile` se leen y una variable exportada 
 llega. `bin/offers` es quien carga `~/.config/offers/env` y quien **rechaza** ese archivo si no tiene
 permisos 600 o 400.
 
-`--pull-status` va por `bin/offers` por lo mismo, y a las 06:40: después del digest (06:00) y del
+**NUNCA crees a mano los archivos de log de un agente.** Medido el 2026-09-30: un `com.juansilva.offers-sync`
+recién instalado fallaba con `last exit code = 78: EX_CONFIG`, sin una sola línea en stdout ni en
+stderr, mientras un clon idéntico bajo otra etiqueta corría perfecto. La causa: los `.log` los había
+creado yo con `: > archivo`, y macOS les pone un `com.apple.macl` que concede acceso al proceso que
+los creó —mi shell— y no al de launchd. launchd no podía abrir su propio stdout y abortaba antes de
+ejecutar nada, que es por lo que no había ni un mensaje de error. Se borran y launchd los crea con
+los permisos correctos:
+
+```sh
+rm -f data/logs/<agente>.{out,err}.log
+launchctl kickstart -k gui/$(id -u)/com.juansilva.offers-<agente>
+```
+
+Y `bin/offers` **no** sirve como `ProgramArguments`: launchd no puede EJECUTAR un script que viva
+dentro de `~/Documents` —macOS lo bloquea con `Operation not permitted`—, aunque `node`, que vive
+fuera, sí puede recibir una ruta de Documents como argumento. Por eso los agentes que necesitan el
+secreto usan `/bin/sh -c` cargando `~/.config/offers/env` en línea: nada de lo que se **ejecuta**
+vive en Documents.
+
+`--pull-status` va por el mismo patrón que el sync, y a las 06:40: después del digest (06:00) y del
 sync (:20), así lee un tablero que ya refleja el corte del día. **Exit 9 significa que apareció un
 `Estado` que el código no conoce**, y el log nombra cuál. No es transitorio: hay que decidir a qué
 escalón del embudo corresponde y añadirlo a `src/notion-board.ts`.
