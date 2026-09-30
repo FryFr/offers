@@ -13,7 +13,14 @@ import { normalizePay } from './compensation.ts';
 export interface DigestOptions { date: string; profile: Profile }
 type Snapshot = ReturnType<typeof report>;
 
-const money = (o: Opportunity, profile: Profile): string => {
+/**
+ * Las tres funciones siguientes están EXPORTADAS porque resuelven exactamente los tres datos que
+ * una carta de presentación necesita confirmar antes de enviarse —compensación, modalidad con su
+ * ubicación, y patrocinio de visado con su cita textual—. Estaban privadas, y el material de
+ * postulación habría acabado con una segunda implementación que dijera lo mismo de otra forma.
+ * Compartirlas garantiza que el digest y la carta nunca se contradigan.
+ */
+export const money = (o: Opportunity, profile: Profile): string => {
   if (!o.compensation) {
     return o.payDisclosure === 'unparsed'
       ? `⚠️ La fuente publicó pago pero no se pudo interpretar${o.payEvidence ? ` (dijo: "${o.payEvidence.raw}")` : ''}`
@@ -26,14 +33,14 @@ const money = (o: Opportunity, profile: Profile): string => {
   return `${declared}${monthly}${pay.converted ? ' (convertido)' : ''}`;
 };
 
-const place = (o: Opportunity): string => {
+export const place = (o: Opportunity): string => {
   const mode = o.remoteness ?? (o.remote === true ? 'fully_remote' : o.remote === false ? 'in_person' : 'unknown');
   const label = { fully_remote: 'Remoto', partially_remote: 'Parcialmente remoto', hybrid: 'Híbrido', in_person: 'Presencial', unknown: 'Modalidad no declarada' }[mode];
   const where = o.locationRestrictions?.length ? o.locationRestrictions.join(', ') : o.location;
   return where ? `${label} — ${where}` : label;
 };
 
-const visa = (o: Opportunity): string | undefined => {
+export const visa = (o: Opportunity): string | undefined => {
   const s = o.sponsorship;
   if (!s || s.status === 'unknown') return undefined;
   if (s.status === 'stated_none') return `🚫 La oferta dice que NO patrocina: "${s.evidence.quote.replace(/\s+/g, ' ').trim()}"`;
