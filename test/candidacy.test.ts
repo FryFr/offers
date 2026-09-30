@@ -43,8 +43,12 @@ test('CandidateFacts usa un contrato cerrado, versionado y normalizado', () => {
   for (const value of [
     null,
     {},
-    { ...factsInput, schemaVersion: 2 },
+    { ...factsInput, schemaVersion: 3 },
     { ...factsInput, unknown: true },
+    // La v1 RECHAZA los campos de la v2. Si los aceptara en silencio, un typo en `experence`
+    // pasaría por clave desconocida válida en vez de fallar ruidosamente.
+    { ...factsInput, experience: [] },
+    { ...factsInput, skillGroups: [] },
     { ...factsInput, skills: null },
     { ...factsInput, highlights: [''] },
     { ...factsInput, contact: { token: 'secret' } },
@@ -154,4 +158,54 @@ test('CLI opt-in genera solo briefs elegibles y no toca drafts', async () => {
     assert.equal(missingCandidate.status, 1);
     assert.match(missingCandidate.stderr, /requiere --candidate/);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('CandidateFacts v2 declara el CV como datos, ordenado y con periodos comprobados', () => {
+  const v2 = {
+    ...factsInput, schemaVersion: 2,
+    experience: [
+      { company: 'Teleperformance', role: 'Client Account Manager', start: '2020-06', end: '2022-08', location: 'Bogotá, Colombia',
+        achievements: ['Managed an operation of 1,200 people and achieved +30% in sales.'] },
+      { company: 'Dynapro Pumps', role: 'Business Systems & AI Specialist', start: '2026-01', location: 'Bogotá, Colombia (remote)',
+        achievements: ['Run 30+ production n8n workflows.', 'Reduced order processing from ~90 minutes to ~2 minutes.'] },
+    ],
+    education: [{ institution: 'Universidad EAN', degree: 'B.Eng. Mechatronics Engineering', start: '2021-02', end: '2025-11' }],
+    languages: [{ name: 'English', level: 'C1', evidence: 'IELTS, British Council; valid 07/2025-07/2028' }, { name: 'Spanish', level: 'Native' }],
+    skillGroups: [{ name: 'AI & agents', skills: ['LLM integration', 'RAG', 'MCP'] }, { name: 'Automation', skills: ['n8n', 'Webhooks'] }],
+  };
+  const parsed = parseCandidateFacts(v2);
+  // El orden es un HECHO de la cronología, no una preferencia que cada renderizador deba recordar:
+  // se fija al parsear, del presente al pasado.
+  assert.deepEqual(parsed.experience!.map(e => e.company), ['Dynapro Pumps', 'Teleperformance']);
+  // Los logros son texto literal: no se normalizan ni se deduplican, porque la carta los cita verbatim.
+  assert.equal(parsed.experience![0]!.achievements[1], 'Reduced order processing from ~90 minutes to ~2 minutes.');
+  assert.equal(parsed.experience![0]!.end, undefined, 'un puesto vigente no tiene fin');
+  // La evidencia del idioma se conserva: "C1" es una afirmación, el IELTS con vigencia es un hecho.
+  assert.match(parsed.languages![0]!.evidence!, /IELTS/);
+  assert.deepEqual(parsed.skillGroups![0]!.skills, ['llm integration', 'rag', 'mcp']);
+  assert.deepEqual(parseCandidateFacts(v2), parsed, 'determinista');
+
+  // Un periodo imposible se rechaza, igual que una fecha imposible en un contrato de oferta.
+  const conFechas = (start: string, end?: string) => ({ ...v2, experience: [{ company: 'Acme', role: 'Dev', start, ...(end ? { end } : {}), achievements: ['Shipped.'] }] });
+  assert.throws(() => parseCandidateFacts(conFechas('2026-01', '2025-12')), /anterior a start/);
+  assert.throws(() => parseCandidateFacts(conFechas('2026-1')), /YYYY-MM/);
+  assert.throws(() => parseCandidateFacts(conFechas('2026-13')), /YYYY-MM/);
+  assert.throws(() => parseCandidateFacts(conFechas('2026-01-15')), /YYYY-MM/);
+  // Y el contrato sigue cerrado DENTRO de cada entrada.
+  assert.throws(() => parseCandidateFacts({ ...v2, experience: [{ company: 'Acme', role: 'Dev', start: '2026-01', achievements: ['x'], extra: 1 }] }));
+  assert.throws(() => parseCandidateFacts({ ...v2, languages: [{ name: 'English' }] }));
+  assert.throws(() => parseCandidateFacts({ ...v2, experience: 'no es lista' }), /se esperaba una lista/);
+});
+
+test('el ejemplo del repositorio cumple el contrato v2 y no trae datos reales', async () => {
+  // `examples/candidate-facts.json` era un placeholder inservible con 3 habilidades genéricas. Su
+  // único trabajo legítimo es ser el ejemplo del contrato, así que se comprueba que lo cumpla.
+  const example = parseCandidateFacts(JSON.parse(await readFile(new URL('../examples/candidate-facts.json', import.meta.url), 'utf8')));
+  assert.equal(example.schemaVersion, 2);
+  assert.ok(example.experience?.length, 'el ejemplo declara experiencia');
+  assert.ok(example.skillGroups?.length && example.languages?.length && example.education?.length);
+  // Y es FICTICIO a propósito: los hechos reales viven en data/, que está gitignoreado.
+  assert.match(example.name, /Example/);
+  assert.match(example.contact!.email!, /@example\.com$/);
+  for (const link of example.contact!.links!) assert.match(link, /^https:\/\/example\.com\//);
 });

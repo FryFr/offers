@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "name": "Example Candidate",
   "headline": "Backend and automation engineer",
   "location": "Bogotá, Colombia",
@@ -17,5 +17,63 @@
   "highlights": [
     "Built and maintained TypeScript services.",
     "Integrated internal systems through documented REST APIs."
+  ],
+  "experience": [
+    {
+      "company": "Example Corp",
+      "role": "Senior Backend Engineer",
+      "start": "2024-03",
+      "location": "Remote",
+      "achievements": [
+        "Built and maintained TypeScript services behind a documented REST API.",
+        "Automated a manual reconciliation step that ran weekly."
+      ]
+    },
+    {
+      "company": "Example Studio",
+      "role": "Backend Engineer",
+      "start": "2021-01",
+      "end": "2024-02",
+      "location": "Bogotá, Colombia",
+      "achievements": [
+        "Integrated three internal systems through documented REST APIs."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "institution": "Example University",
+      "degree": "B.Eng. Software Engineering",
+      "start": "2016-02",
+      "end": "2020-11"
+    }
+  ],
+  "languages": [
+    {
+      "name": "Spanish",
+      "level": "Native"
+    },
+    {
+      "name": "English",
+      "level": "C1",
+      "evidence": "Example certificate, issued 2025, valid through 2028"
+    }
+  ],
+  "skillGroups": [
+    {
+      "name": "Backend",
+      "skills": [
+        "TypeScript",
+        "Node.js",
+        "REST APIs"
+      ]
+    },
+    {
+      "name": "Automation",
+      "skills": [
+        "Scheduled jobs",
+        "Webhooks"
+      ]
+    }
   ]
 }
