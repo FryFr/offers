@@ -391,3 +391,12 @@ export async function revalidate() { return { url: ${JSON.stringify(url)}, check
     await assert.rejects(access(marker));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('el plan no describe dos veces las mismas propiedades', () => {
+  // `update.properties` era byte a byte igual a `create.body.properties`, que es de donde el PATCH
+  // las toma cuando la página ya existe. Una segunda copia no describía otra petición.
+  const plan = planNotionSync(records, config);
+  assert.ok(plan.records.length > 0);
+  assert.equal('update' in plan.records[0]!, false, 'el plan no lleva una copia de las propiedades');
+  assert.ok((plan.records[0]!.create.body as Record<string, unknown>).properties, 'la única copia vive en create');
+});

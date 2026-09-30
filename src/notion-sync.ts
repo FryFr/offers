@@ -136,7 +136,10 @@ export function planNotionSync(records: readonly NotionRecord[], value: unknown,
   // que el tipo se ensanche permitía pasarlo donde se exige un plan de dry-run.
   return { mode: 'dry-run' as const, confirmed: false as const,
     blocked: checked.filter(r => r.verification.status !== 'verified').map(r => ({ externalKey: r.record.externalKey, verification: r.verification })),
-    records: checked.filter(r => r.verification.status === 'verified').map(({ record }) => ({ externalKey: record.externalKey, action: 'query-then-upsert' as const, query: query(config, record.externalKey), create: createRequest(record, config), update: { properties: properties(record, config) } })) };
+    // Sin `update`: sus `properties` eran byte a byte las mismas que `create.body.properties`, que
+    // es de donde el PATCH las toma cuando la página ya existe. Una segunda copia del mismo objeto
+    // no describía una petición distinta; solo duplicaba el plan en memoria y en disco.
+    records: checked.filter(r => r.verification.status === 'verified').map(({ record }) => ({ externalKey: record.externalKey, action: 'query-then-upsert' as const, query: query(config, record.externalKey), create: createRequest(record, config) })) };
 }
 /**
  * La forma del plan que se PERSISTE: claves y motivos, nunca peticiones HTTP.
