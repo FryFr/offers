@@ -28,7 +28,7 @@ const notionSchema = (overrides: Record<string, { type: string }> = {}) => ({
   Location: { type: 'rich_text' }, Relocation: { type: 'select' }, 'Recommendation rank': { type: 'number' },
   'Recommendation priority': { type: 'number' }, Relevance: { type: 'number' }, 'Relevance tier': { type: 'select' },
   'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
-  'Freelance review': { type: 'select' }, 'External key': { type: 'rich_text' }, ...overrides,
+  'Freelance review': { type: 'select' }, Origin: { type: 'rich_text' }, 'External key': { type: 'rich_text' }, ...overrides,
 });
 
 test('registry rejects embedded secrets, duplicate IDs, unknown options, unsafe endpoints and too-fast cadence', () => {

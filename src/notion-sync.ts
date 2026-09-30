@@ -5,13 +5,22 @@ import { verification, PUBLICATION_WINDOW_DAYS, type Verification } from './eval
 
 type Projection = ReturnType<typeof report>['notion']['records'][number];
 export type NotionRecord = Pick<Projection, 'externalKey' | 'properties'> & { opportunity?: Opportunity };
-const calculationContextFields = ['Origin', 'Calculation assumptions', 'Explanation'] as const;
+/**
+ * Columnas que solo existen para auditar el cálculo, no para operar el tablero.
+ *
+ * `Origin` SALIÓ de esta lista: es el nombre de la fuente que publicó la vacante —`himalayas`,
+ * `greenhouse-elastic`—, un dato del tablero que sirve para filtrar y para ver si una fuente
+ * aporta algo. Estaba agrupado con `Explanation`, que es un `JSON.stringify` de la evaluación
+ * completa troceado a 2000 caracteres, así que apagar el volcado apagaba también la procedencia.
+ * Son dos cosas distintas y ahora se deciden por separado.
+ */
+const calculationContextFields = ['Calculation assumptions', 'Explanation'] as const;
 /**
  * Nombres de propiedad que este módulo sabe enviar. Añadir uno aquí SIN crearlo en la base de
  * Notion hace que cada upsert devuelva 400 y `failed` iguale al total: la verificación de esquema
  * de `--sync` es la que debe impedirlo, no la suerte.
  */
-const fields = ['Name', 'Company', 'URL', 'Type', 'Expiration', 'Deadline', 'Verification', 'Verification reasons', 'Published', 'Screening', 'Screening reasons', 'Employment eligibility', 'Location', 'Relocation', 'Recommendation rank', 'Recommendation priority', 'Relevance', 'Relevance tier', 'Fit score', 'Economic score', 'Hourly USD', 'Freelance review', ...calculationContextFields] as const;
+const fields = ['Name', 'Company', 'URL', 'Type', 'Expiration', 'Deadline', 'Verification', 'Verification reasons', 'Published', 'Screening', 'Screening reasons', 'Employment eligibility', 'Location', 'Relocation', 'Recommendation rank', 'Recommendation priority', 'Relevance', 'Relevance tier', 'Fit score', 'Economic score', 'Hourly USD', 'Freelance review', 'Origin', ...calculationContextFields] as const;
 export interface NotionConfig {
   enabled: boolean;
   dataSourceId?: string;

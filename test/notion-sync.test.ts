@@ -185,7 +185,7 @@ test('el esquema se comprueba contra la base y dice QUÉ falta', async () => {
     Location: { type: 'rich_text' }, Relocation: { type: 'select' }, 'Recommendation rank': { type: 'number' },
     'Recommendation priority': { type: 'number' }, Relevance: { type: 'number' }, 'Relevance tier': { type: 'select' },
     'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
-    'Freelance review': { type: 'select' }, 'External key': { type: 'rich_text' },
+    'Freelance review': { type: 'select' }, Origin: { type: 'rich_text' }, 'External key': { type: 'rich_text' },
   } as Record<string, { type: string }>;
   // El esquema se pide con GET a la data source; el endpoint de query devuelve filas, no columnas.
   const withSchema = (properties: Record<string, { type: string }>): HttpTransport => async request => {
@@ -216,7 +216,7 @@ test('--apply-schema añade solo lo que falta y nunca cambia un tipo existente',
     Location: { type: 'rich_text' }, Relocation: { type: 'select' }, 'Recommendation rank': { type: 'number' },
     'Recommendation priority': { type: 'number' }, Relevance: { type: 'number' }, 'Relevance tier': { type: 'select' },
     'Fit score': { type: 'number' }, 'Economic score': { type: 'number' }, 'Hourly USD': { type: 'number' },
-    'Freelance review': { type: 'select' }, 'External key': { type: 'rich_text' },
+    'Freelance review': { type: 'select' }, Origin: { type: 'rich_text' }, 'External key': { type: 'rich_text' },
   } as Record<string, { type: string }>;
   const base = (properties: Record<string, { type: string }>) => {
     const patches: Record<string, unknown>[] = [];
@@ -399,4 +399,18 @@ test('el plan no describe dos veces las mismas propiedades', () => {
   assert.ok(plan.records.length > 0);
   assert.equal('update' in plan.records[0]!, false, 'el plan no lleva una copia de las propiedades');
   assert.ok((plan.records[0]!.create.body as Record<string, unknown>).properties, 'la única copia vive en create');
+});
+
+test('Origin es dato del tablero y se envía aunque el contexto de cálculo esté apagado', () => {
+  // `Origin` es el nombre de la fuente que publicó la vacante: sirve para filtrar el tablero y
+  // para ver si una fuente aporta algo. Estaba agrupado con `Explanation`, que es un
+  // `JSON.stringify` de la evaluación entera, así que apagar el volcado apagaba la procedencia.
+  const sinContexto = planNotionSync(records, { ...config, includeCalculationContext: false });
+  const props = sinContexto.records[0]!.create.body.properties as Record<string, unknown>;
+  assert.ok('Origin' in props, 'la procedencia viaja siempre');
+  assert.equal('Explanation' in props, false, 'el volcado de la evaluación no');
+  assert.equal('Calculation assumptions' in props, false);
+  // Y con el contexto encendido siguen viajando los tres.
+  const conContexto = planNotionSync(records, { ...config, includeCalculationContext: true }).records[0]!.create.body.properties as Record<string, unknown>;
+  for (const key of ['Origin', 'Explanation', 'Calculation assumptions']) assert.ok(key in conContexto, key);
 });
