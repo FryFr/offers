@@ -132,9 +132,40 @@ function gate(record: NotionRecord, now: Date): Verification {
 export function planNotionSync(records: readonly NotionRecord[], value: unknown, now = new Date()) {
   const config = validateNotionConfig(value);
   const checked = records.map(record => ({ record, verification: gate(record, now) }));
-  return { mode: 'dry-run' as const, confirmed: false,
+  // `confirmed` se fija como literal, no como boolean: este plan NUNCA está confirmado, y dejar
+  // que el tipo se ensanche permitía pasarlo donde se exige un plan de dry-run.
+  return { mode: 'dry-run' as const, confirmed: false as const,
     blocked: checked.filter(r => r.verification.status !== 'verified').map(r => ({ externalKey: r.record.externalKey, verification: r.verification })),
     records: checked.filter(r => r.verification.status === 'verified').map(({ record }) => ({ externalKey: record.externalKey, action: 'query-then-upsert' as const, query: query(config, record.externalKey), create: createRequest(record, config), update: { properties: properties(record, config) } })) };
+}
+/**
+ * La forma del plan que se PERSISTE: claves y motivos, nunca peticiones HTTP.
+ *
+ * Las peticiones completas del plan no las lee nadie. `upsertNotionRecords` reconstruye la suya
+ * desde el registro vigente —tiene que hacerlo, porque vuelve a pasar el gate y a revalidar antes
+ * de escribir—, y el único consumidor del plan en disco mira cuántos hay y por qué se bloquearon
+ * los demás. Medido el 2026-09-30: de los 427 MB del checkpoint, 57,4 MB eran esas peticiones
+ * —URL, cabeceras y cuerpo repetidos registro a registro— sin un solo lector.
+ */
+export interface CompactNotionPlan {
+  mode: 'dry-run';
+  confirmed: false;
+  /** Solo las claves externas. `length` es lo único que se consultaba de esta lista. */
+  records: string[];
+  blocked: ({ externalKey: string; reasons: readonly string[] } | { externalKey: string; reason: string })[];
+}
+export function compactNotionPlan(plan: {
+  mode: 'dry-run'; confirmed: false;
+  records: readonly { externalKey: string }[];
+  // Dos formas a propósito: `planNotionSync` bloquea con la verificación completa, y el plan de
+  // reserva de `runSourceCycle` (sin esquema verificado) bloquea con un motivo único.
+  blocked: readonly ({ externalKey: string; verification: Verification } | { externalKey: string; reason: string })[];
+}): CompactNotionPlan {
+  return { mode: plan.mode, confirmed: plan.confirmed,
+    records: plan.records.map(r => r.externalKey),
+    blocked: plan.blocked.map(b => 'reason' in b
+      ? { externalKey: b.externalKey, reason: b.reason }
+      : { externalKey: b.externalKey, reasons: b.verification.reasons }) };
 }
 function createRequest(record: NotionRecord, config: NotionConfig) {
   return request(config, 'POST', 'pages', { parent: config.dataSourceId ? { type: 'data_source_id', data_source_id: config.dataSourceId } : { database_id: config.databaseId }, properties: properties(record, config) });

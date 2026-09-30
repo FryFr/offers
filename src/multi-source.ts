@@ -238,8 +238,8 @@ export async function runSourceCycle(options: CycleOptions) {
   store = ingest(store, store.records.filter(r => ambiguousUrls.has(r.opportunity.url)).map(r => ({ ...r.opportunity,
     availability: { url: r.opportunity.url!, checkedAt, outcome: 'ambiguous', evidence: 'legacy_duplicate_conflict' } })));
   const snapshot = report(store, options.profile, now);
-  const notionPlan = config ? planNotionSync(snapshot.notion.records, config, now) : { mode: 'dry-run' as const, confirmed: false,
-    records: [], blocked: snapshot.records.map(r => ({ externalKey: r.id, reason: 'schema_unverified' })) };
+  const notionPlan = config ? planNotionSync(snapshot.notion.records, config, now) : { mode: 'dry-run' as const, confirmed: false as const,
+    records: [] as { externalKey: string }[], blocked: snapshot.records.map(r => ({ externalKey: r.id, reason: 'schema_unverified' })) };
   return { version: 1 as const, mode: 'dry-run' as const, confirmed: false as const, generatedAt: checkedAt, state, health, jobs, enrichments, store, notionPlan,
     counts: { captured: captures.length, unique: jobs.length, duplicates: captures.length - jobs.length, eligible: notionPlan.records.length, blocked: notionPlan.blocked.length } };
 }

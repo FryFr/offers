@@ -9,7 +9,7 @@ import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts
 import { parseRegistry } from './source-registry.ts';
 import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
-import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
+import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
 import type { Provenance } from './source-adapters.ts';
 import { fetchRegister, registerIndex, type SponsorRegister } from './uk-sponsors.ts';
@@ -65,8 +65,13 @@ export async function runSources(options: { root?: string; enrichModel?: string;
     }
     // `jobs` es la captura cruda del ciclo y nadie la vuelve a leer: runSources solo recupera
     // store, state y provenance del checkpoint previo. Persistirla duplicaba el archivo sin uso.
+    //
+    // Y el plan de Notion se guarda compacto por la misma razón: sus peticiones HTTP no las lee
+    // nadie, porque `upsertNotionRecords` reconstruye la suya desde el registro vigente. Lo que
+    // SÍ se devuelve en memoria sigue siendo el plan completo, que es lo que el CLI inspecciona
+    // para decidir el código de salida.
     const { jobs: _discarded, ...persisted } = result;
-    await atomicMailWrite(join(data, 'source-cycle.json'), { ...persisted, provenance });
+    await atomicMailWrite(join(data, 'source-cycle.json'), { ...persisted, provenance, notionPlan: compactNotionPlan(result.notionPlan) });
     // Estado del proceso, no del checkpoint. Distingue tres casos que antes se colapsaban en
     // exit 5: sin archivo (no hay Notion que verificar), con archivo sin verificar (sí alerta),
     // y con archivo verificado (el planificador decide).

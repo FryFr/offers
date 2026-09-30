@@ -7,10 +7,10 @@ import { parseRegistry, sourceHeaders, MAX_SOURCES, type Source } from '../src/s
 import { adaptSource, canonicalUrl } from '../src/source-adapters.ts';
 import { parseRss } from '../src/rss.ts';
 import { collectSource, deduplicate, probeSource, runSourceCycle } from '../src/multi-source.ts';
-import { parseProfile } from '../src/contracts.ts';
+import { parseOpportunity, parseProfile } from '../src/contracts.ts';
 import { identity, ingest, report } from '../src/pipeline.ts';
 import { runSources, runNotionSync, sourceHealth, parseSourceState, sourcesMain } from '../src/source-cli.ts';
-import { upsertNotionRecords, type HttpTransport } from '../src/notion-sync.ts';
+import { upsertNotionRecords, compactNotionPlan, type HttpTransport } from '../src/notion-sync.ts';
 const now = new Date('2026-09-19T12:00:00Z'), profile = parseProfile({});
 const config = { enabled: false, dataSourceId: '12345678-1234-1234-1234-123456789012', externalKeyProperty: 'External key' };
 const fixture = (name: string) => readFile(new URL(`./fixtures/sources/${name}`, import.meta.url), 'utf8');
@@ -458,4 +458,49 @@ test('--probe-source mide lo que decide si un board sirve: fecha, geografía y r
 
   // Un board que no existe se reporta como dato, no como excepción: sondear es leer.
   assert.equal(await sourcesMain(['--probe-source', 'ashby']), 2, 'faltando el token, se rechazan los argumentos');
+});
+
+test('el plan de Notion persistido guarda claves y motivos, no peticiones HTTP', async () => {
+  // Medido el 2026-09-30: de los 427 MB del checkpoint, 57,4 MB eran peticiones HTTP del plan
+  // —URL, cabeceras y cuerpo por registro— y ningún código las leía: `upsertNotionRecords`
+  // reconstruye la suya desde el registro vigente, porque vuelve a pasar el gate antes de escribir.
+  const root = await mkdtemp(join(tmpdir(), 'offers-plan-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), '{}');
+    await writeFile(join(root, 'examples/sources.json'), JSON.stringify({ version: 1, sources: [{ id: 'ashby', adapter: 'ashby', enabled: false, board: 'acme', company: 'Acme' }] }));
+    await writeFile(join(root, 'data/notion-local.json'), JSON.stringify({ schemaVerified: true, config }));
+    const fresh = new Date().toISOString();
+    const url = 'https://example.com/job';
+    await writeFile(join(root, 'data/offers.json'), JSON.stringify(ingest({ version: 1, records: [] }, [parseOpportunity({
+      title: 'Senior Software Engineer', company: 'Acme', skills: [], url, publishedAt: fresh.slice(0, 10),
+      publicationEvidence: { url, excerpt: 'Published', observedAt: fresh },
+      availability: { url, checkedAt: fresh, outcome: 'open', httpStatus: 200, evidence: 'listing' } })])));
+
+    const result = await runSources({ root });
+    // En MEMORIA el plan sigue completo: es lo que el CLI inspecciona para decidir el código de
+    // salida, y lo que las pruebas de notion-sync cotejan propiedad por propiedad.
+    assert.ok(result.notionPlan.records.length > 0, 'la oferta vigente debe planificarse');
+    assert.ok('create' in result.notionPlan.records[0]!, 'el plan en memoria conserva la petición');
+
+    const disk = JSON.parse(await readFile(join(root, 'data/source-cycle.json'), 'utf8'));
+    assert.deepEqual(disk.notionPlan.records, [result.notionPlan.records[0]!.externalKey], 'en disco solo la clave');
+    // La prueba que de verdad importa: ni una URL de Notion ni una cabecera en todo el archivo.
+    const serialized = JSON.stringify(disk.notionPlan);
+    for (const leak of ['api.notion.com', 'Notion-Version', 'query-then-upsert', 'properties']) {
+      assert.equal(serialized.includes(leak), false, `el plan persistido no debe contener "${leak}"`);
+    }
+    assert.equal(disk.counts.eligible, 1, 'el recuento se calcula del plan en memoria y no cambia');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('el plan persistido conserva el motivo de bloqueo en sus dos formas', async () => {
+  // `planNotionSync` bloquea con la verificación completa; el plan de reserva, sin esquema
+  // verificado, bloquea con un motivo único. Compactar no puede colapsar las dos en una.
+  const verification = { status: 'unknown' as const, reasons: ['availability_missing'], ageDays: null, sameDay: false, validUntil: null, windowDays: 7 };
+  const key = 'a'.repeat(64);
+  assert.deepEqual(compactNotionPlan({ mode: 'dry-run', confirmed: false, records: [], blocked: [{ externalKey: key, verification }] }).blocked,
+    [{ externalKey: key, reasons: ['availability_missing'] }]);
+  assert.deepEqual(compactNotionPlan({ mode: 'dry-run', confirmed: false, records: [], blocked: [{ externalKey: key, reason: 'schema_unverified' }] }).blocked,
+    [{ externalKey: key, reason: 'schema_unverified' }]);
 });
