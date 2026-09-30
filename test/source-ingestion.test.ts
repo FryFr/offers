@@ -8,6 +8,7 @@ import { adaptSource, canonicalUrl } from '../src/source-adapters.ts';
 import { parseRss } from '../src/rss.ts';
 import { collectSource, deduplicate, probeSource, runSourceCycle } from '../src/multi-source.ts';
 import { parseOpportunity, parseProfile } from '../src/contracts.ts';
+import { relevance } from '../src/relevance.ts';
 import { identity, ingest, report } from '../src/pipeline.ts';
 import { runSources, runNotionSync, sourceHealth, parseSourceState, sourcesMain } from '../src/source-cli.ts';
 import { upsertNotionRecords, compactNotionPlan, type HttpTransport } from '../src/notion-sync.ts';
@@ -608,4 +609,54 @@ test('--vacuum informa sin escribir y solo borra con --apply', async () => {
     // Un argumento desconocido se rechaza en vez de interpretarse como "borra".
     assert.equal(await sourcesMain(['--vacuum', '--force'], root), 2);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('freehire: fecha presente, región declarada como restricción y descripción en texto', async () => {
+  // Fixture capturado del servicio real el 2026-09-30. La primera afirmación es la lección que
+  // costó seis sesiones con greenhouse: un adaptador sin `publishedAt` hace que el gate de frescura
+  // tumbe el 100% de sus ofertas, y nada lo detectaba hasta medir por qué el corte bajó.
+  // El fixture se capturó el 2026-09-30, así que se juzga con un reloj de ese día: `publication()`
+  // rechaza una fecha futura, y con el reloj compartido de las demás pruebas lo serían todas.
+  const capturado = new Date('2026-09-30T12:00:00Z');
+  const { jobs, rejected } = adaptSource(source('freehire'), await fixture('freehire.json'), capturado);
+  assert.equal(rejected, 0);
+  assert.equal(jobs.length, 3);
+  for (const job of jobs) assert.ok(job.opportunity.publishedAt, `${job.opportunity.title} sin publishedAt`);
+
+  const latam = jobs.find(j => j.opportunity.title.includes('Backend Developer'))!;
+  assert.equal(latam.opportunity.remoteness, 'fully_remote');
+  // `regions` y `countries` son las restricciones declaradas del puesto. La compuerta de geografía
+  // las lee junto a `location`, y reconoce `latam`, así que un remoto de la región PUNTÚA.
+  // Región Y país: los dos son restricción declarada, y juntos dicen más que cualquiera solo.
+  assert.deepEqual(latam.opportunity.locationRestrictions, ['latam', 'ar']);
+  const geo = relevance(latam.opportunity, parseProfile({ remoteOnly: true }), 'employment');
+  assert.equal(geo.blockers.includes('remote_region_excluded'), false, 'un remoto LATAM no puede bloquearse');
+  assert.match(geo.signals.find(s => s.reason.startsWith('Remoto'))!.reason, /abierto a la región/);
+
+  // La descripción llega en HTML y se guarda como texto, acotada al tope de todos los adaptadores.
+  assert.ok(latam.opportunity.description);
+  assert.equal(latam.opportunity.description!.includes('<'), false, 'el HTML se convierte a texto');
+  assert.ok(latam.opportunity.description!.length <= 20_000);
+  // El id viene del `external_id` del proveedor, que es estable; el `public_slug` cambia con el título.
+  assert.equal(latam.provenance[0]!.externalId, JSON.parse(await fixture('freehire.json')).data.find((j: { title: string }) => j.title.includes('Backend Developer')).external_id);
+
+  // Y el gate de rol hace su trabajo con lo que el agregador trae de todo: el abogado y el conductor
+  // salen `off_target` sin que nadie los filtre a mano.
+  const real = parseProfile(JSON.parse(await readFile(new URL('../examples/profile.json', import.meta.url), 'utf8')));
+  for (const titulo of ['Attorney', 'Driver']) {
+    const job = jobs.find(j => j.opportunity.title.includes(titulo))!;
+    assert.equal(relevance(job.opportunity, real, 'employment').tier, 'off_target', `${titulo} debe quedar fuera`);
+  }
+});
+
+test('--probe-source no exige token a un agregador, que no lo tiene', async () => {
+  // El registro fija el endpoint de un agregador y RECHAZA `board`. Exigir un token hacía que
+  // `--probe-source freehire x` fallara con `source_endpoint_invalid`, que parece un fallo del
+  // proveedor cuando era la herramienta pidiendo un dato que no existe.
+  assert.equal(await sourcesMain(['--probe-source', 'freehire', 'x']), 2, 'un agregador con token es un error de argumentos');
+  assert.equal(await sourcesMain(['--probe-source', 'ashby']), 2, 'un board ATS sin token también');
+  // Y la fuente se construye igual por el registro, así que valida lo mismo que el ciclo.
+  const [aggregator] = parseRegistry({ version: 1, sources: [{ id: 'probe', adapter: 'freehire', enabled: true, captureHtml: false }] });
+  assert.match(aggregator!.endpoint, /^https:\/\/freehire\.me\/api\/v1\//);
+  assert.equal(aggregator!.availabilityTrust, 'ambiguous', 'un agregador no confirma disponibilidad por estar en el feed');
 });

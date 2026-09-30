@@ -175,6 +175,12 @@
       "minIntervalMinutes": 120
     },
     {
+      "id": "freehire",
+      "adapter": "freehire",
+      "enabled": true,
+      "minIntervalMinutes": 180
+    },
+    {
       "id": "ashby-supabase",
       "adapter": "ashby",
       "board": "supabase",

@@ -1,0 +1,129 @@
+{
+  "data": [
+    {
+      "public_slug": "contract-employment-litigation-attorney-remote-example-corp-aojzhfnb",
+      "source": "greenhouse",
+      "external_id": "examplecorpsandbox:6931289",
+      "url": "https://job-boards.greenhouse.io/examplecorpsandbox/jobs/6931289?utm_source=freehire.me",
+      "title": "Contract Employment Litigation Attorney (Remote)",
+      "company": "Example Corp",
+      "company_slug": "example",
+      "location": "Remote",
+      "description": "<div><p><em>*** This is where your organization can create a consistent intro to all of your jobs, creating consistency in voice and messaging across all job posts</em></p>\n<p><em>*** C&#39;est ici que votre organisation peut créer une introduction cohérente à tous vos emplois, en créant une cohérence dans la voix et la messagerie dans tous les postes.<br></em></p></div><p><span>Davis Wright Tremaine LLP is seeking an experienced mid to senior level employment litigation attorney for engagement through the firm’s alternative-track contract attorney and staffing program, DWTSurge. The selected ",
+      "countries": [],
+      "regions": [
+        "global"
+      ],
+      "work_mode": "remote",
+      "skills": [
+        "legal-research"
+      ],
+      "cities": [],
+      "posted_at": "2026-09-30T01:29:16Z",
+      "created_at": "2026-06-16T21:02:40Z",
+      "updated_at": "2026-09-30T02:17:17Z",
+      "last_seen_at": "2026-09-30T02:17:17Z",
+      "closed_at": null,
+      "enrichment": {
+        "category": "legal"
+      },
+      "reality": {
+        "class": "stale",
+        "age_days": 105,
+        "repost_count": 1,
+        "mass_posting_count": 1,
+        "fake_freshness": true
+      }
+    },
+    {
+      "public_slug": "driver-example-corp-mpnoyrba",
+      "source": "greenhouse",
+      "external_id": "examplecorpsandbox:4414499",
+      "url": "https://job-boards.greenhouse.io/examplecorpsandbox/jobs/4414499?utm_source=freehire.me",
+      "title": "Driver",
+      "company": "Example Corp",
+      "company_slug": "example",
+      "location": "Anywhere",
+      "description": "<div><p><em>*** This is where your organization can create a consistent intro to all of your jobs, creating consistency in voice and messaging across all job posts</em></p>\n<p><em>*** C&#39;est ici que votre organisation peut créer une introduction cohérente à tous vos emplois, en créant une cohérence dans la voix et la messagerie dans tous les postes.<br></em></p></div><div>\n<h4>Description</h4>\n<div>\n<p>We’re Ampere, the pioneers of super-fast delivery. We know what it takes to deliver your goods to the customer in 10 minutes - our star teams work together to make each order a seamless exper",
+      "countries": [],
+      "regions": [
+        "global",
+        "uk"
+      ],
+      "work_mode": "remote",
+      "skills": [],
+      "cities": [],
+      "posted_at": "2026-09-30T01:29:16Z",
+      "created_at": "2026-06-16T21:02:40Z",
+      "updated_at": "2026-09-30T02:17:18Z",
+      "last_seen_at": "2026-09-30T02:17:18Z",
+      "closed_at": null,
+      "enrichment": {
+        "category": "logistics"
+      },
+      "reality": {
+        "class": "stale",
+        "age_days": 105,
+        "repost_count": 1,
+        "mass_posting_count": 1,
+        "fake_freshness": true
+      }
+    },
+    {
+      "public_slug": "1033-backend-developer-python-sr-remote-latam-darwoft-fa4ic7bx",
+      "source": "whatjobs-ar",
+      "external_id": "python developer:34355889",
+      "url": "https://ar.whatjobs.com/pub_api__cpl__34355889__7080?geoID=4036&utm_campaign=publisher&utm_medium=api&utm_source=freehire.me",
+      "title": "1033 - Backend Developer (Python) · Sr · Remote · LATAM",
+      "company": "Darwoft",
+      "company_slug": "darwoft",
+      "location": "Cordoba, Argentina",
+      "description": "<p><em>Disclaimer – Must read: Commitment &amp; Focus</em><br> <em>This role requires full-time dedication, with clear priority given to Darwoft projects during the established working hours. It is not compatible with other full-time professional engagements. Any additional professional activities must be disclosed in advance and must not interfere with the responsibilities or working hours of this role.</em></p> <h3>About Darwoft</h3> <p>Darwoft is a software factory that builds custom software solutions and provides IT staff augmentation services for international clients, mainly in the Unit",
+      "countries": [
+        "ar"
+      ],
+      "regions": [
+        "latam"
+      ],
+      "work_mode": "remote",
+      "skills": [
+        "ab-testing",
+        "ai",
+        "analytics",
+        "api",
+        "bigquery",
+        "cloud",
+        "distributed-systems",
+        "event-driven-architecture",
+        "fastapi",
+        "fintech",
+        "flask",
+        "gcp"
+      ],
+      "cities": [
+        "Córdoba"
+      ],
+      "posted_at": "2026-09-30T00:56:28Z",
+      "created_at": "2026-09-30T00:56:28Z",
+      "updated_at": "2026-09-30T00:56:28Z",
+      "last_seen_at": "2026-09-30T00:56:28Z",
+      "closed_at": null,
+      "enrichment": {
+        "seniority": "senior",
+        "category": "backend"
+      },
+      "reality": {
+        "class": "fresh",
+        "age_days": 0,
+        "repost_count": 1,
+        "mass_posting_count": 1,
+        "fake_freshness": false
+      }
+    }
+  ],
+  "meta": {
+    "limit": 3,
+    "offset": 0,
+    "total": 1943
+  }
+}

@@ -5,7 +5,7 @@ import { validatePublicUrl } from './safe-http.ts';
  * su disponibilidad. Agregadores: espejos con retraso — su presencia no confirma nada.
  */
 export const ATS_ADAPTERS = ['greenhouse', 'lever', 'ashby'] as const;
-export const AGGREGATOR_ADAPTERS = ['remotive', 'himalayas', 'jobicy', 'remoteok', 'arbeitnow', 'landingjobs'] as const;
+export const AGGREGATOR_ADAPTERS = ['remotive', 'himalayas', 'jobicy', 'remoteok', 'arbeitnow', 'landingjobs', 'freehire'] as const;
 /** Una sola lista: el tipo se deriva de ella para que no puedan desincronizarse. */
 export const ADAPTERS = [...ATS_ADAPTERS, ...AGGREGATOR_ADAPTERS, 'rss'] as const;
 export type Adapter = typeof ADAPTERS[number];
@@ -29,13 +29,24 @@ const AGGREGATOR_ENDPOINTS: Record<string, string> = {
   remoteok: 'https://remoteok.com/api',
   arbeitnow: 'https://www.arbeitnow.com/api/job-board-api',
   landingjobs: 'https://landing.jobs/api/v1/jobs?limit=100',
+  /**
+   * Agrega ~92 plataformas ATS rastreando páginas de carrera de empresas, no raspando portales.
+   *
+   * La consulta está FIJADA aquí, como la de cualquier agregador, y acota a lo único que puede
+   * llegar a un corte desde Colombia: remoto, en una región que la compuerta de geografía acepta,
+   * y dentro de la ventana de publicación. Medido el 2026-09-30: sin el filtro de región son 21.192
+   * resultados —casi todos "remote, US only", que el gate bloquea— y con él 1.943, que cabe en el
+   * tope de 2.000 filas y 25 páginas. Deliberadamente SIN `q`: el filtrado por rol y habilidades es
+   * trabajo de `relevance()`, que es determinista y no cuesta una petición.
+   */
+  freehire: 'https://freehire.me/api/v1/agent/jobs/search?work_mode=remote&regions=latam&regions=global&regions=americas&posted_within_days=7&limit=100',
 };
 /**
  * Cadencia mínima por adaptador. Remotive pide explícitamente un máximo de ~4 llamadas diarias
  * en sus términos; el resto se mantiene por encima de lo razonable para una API pública gratuita.
  */
-const MIN_INTERVAL: Record<string, number> = { remotive: 360, himalayas: 120, jobicy: 180, remoteok: 180, arbeitnow: 120, landingjobs: 120 };
-const DEFAULT_INTERVAL: Record<string, number> = { remotive: 360, himalayas: 180, jobicy: 360, remoteok: 360, arbeitnow: 180, landingjobs: 180 };
+const MIN_INTERVAL: Record<string, number> = { remotive: 360, himalayas: 120, jobicy: 180, remoteok: 180, arbeitnow: 120, landingjobs: 120, freehire: 120 };
+const DEFAULT_INTERVAL: Record<string, number> = { remotive: 360, himalayas: 180, jobicy: 360, remoteok: 360, arbeitnow: 180, landingjobs: 180, freehire: 180 };
 /** El techo protege el tiempo de ciclo y el tamaño del checkpoint, no la corrección. */
 export const MAX_SOURCES = 400;
 export function parseRegistry(value: unknown): Source[] {

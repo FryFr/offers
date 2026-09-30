@@ -6,7 +6,7 @@ import { parseLedger, deliveredIds, recordDelivery } from './delivery-ledger.ts'
 import { renderDigest } from './digest.ts';
 import { compactHistory, parseStore, pruneStore, report } from './pipeline.ts';
 import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts';
-import { parseRegistry } from './source-registry.ts';
+import { parseRegistry, AGGREGATOR_ADAPTERS } from './source-registry.ts';
 import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
 import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
@@ -360,13 +360,17 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
   }
   if (args[0] === '--probe-source') {
     const [, adapter, token] = args;
-    if (args.length !== 3 || !adapter || !token) { console.error('probe_source_arguments'); return 2; }
+    // Un AGREGADOR no lleva token: el registro le fija el endpoint y rechaza `board`. Exigirlo
+    // hacía que `--probe-source freehire x` fallara con `source_endpoint_invalid`, que parece un
+    // fallo del proveedor cuando en realidad era la herramienta pidiendo un dato que no existe.
+    const needsToken = adapter !== undefined && !AGGREGATOR_ADAPTERS.includes(adapter as typeof AGGREGATOR_ADAPTERS[number]);
+    if (!adapter || (needsToken ? args.length !== 3 || !token : args.length !== 2)) { console.error('probe_source_arguments'); return 2; }
     try {
       // La fuente se construye POR EL REGISTRO, no a mano: así el sondeo valida exactamente lo
       // mismo que validará el ciclo, y el endpoint se arma una sola vez en todo el proyecto. Si
       // el registro rechaza esta configuración, el ciclo también la habría rechazado.
       const [source] = parseRegistry({ version: 1, sources: [{ id: 'probe', adapter, enabled: true, captureHtml: false,
-        ...(adapter === 'rss' ? { endpoint: token } : { board: token, company: 'Probe' }) }] });
+        ...(!needsToken ? {} : adapter === 'rss' ? { endpoint: token } : { board: token, company: 'Probe' }) }] });
       const profile = parseProfile(await json(join(root, 'examples/profile.json')));
       console.log(JSON.stringify(await probeSource(source!, profile, new Date())));
       return 0;

@@ -93,7 +93,7 @@ const employmentType = (raw: unknown): Opportunity['employmentType'] => typeof r
 /** Vocabulario de seniority de los proveedores → enum interno. */
 const SENIORITY: Record<string, NonNullable<Opportunity['seniority']>[number]> = {
   internship: 'intern', intern: 'intern', entrylevel: 'junior', junior: 'junior', jr: 'junior',
-  midlevel: 'mid', mid: 'mid', intermediate: 'mid', associate: 'mid',
+  midlevel: 'mid', mid: 'mid', middle: 'mid', intermediate: 'mid', associate: 'mid',
   senior: 'senior', sr: 'senior', staff: 'staff', principal: 'principal', lead: 'lead',
   manager: 'lead', director: 'director', executive: 'executive', vp: 'executive', clevel: 'executive',
 };
@@ -172,7 +172,7 @@ function htmlToText(raw: string): string {
  */
 const ROWS_PATH: Record<Adapter, string | null> = {
   greenhouse: 'jobs', lever: null, ashby: 'jobs', rss: null,
-  remotive: 'jobs', himalayas: 'jobs', jobicy: 'jobs', remoteok: null, arbeitnow: 'data', landingjobs: null,
+  remotive: 'jobs', himalayas: 'jobs', jobicy: 'jobs', remoteok: null, arbeitnow: 'data', landingjobs: null, freehire: 'data',
 };
 export function adaptSource(source: Source, body: string, now: Date, endpoint = source.endpoint): { jobs: CapturedJob[]; rejected: number; nextCursor?: string } {
   const payload: unknown = source.adapter === 'rss' ? parseRss(body) : JSON.parse(body);
@@ -199,6 +199,41 @@ export function adaptSource(source: Source, body: string, now: Date, endpoint = 
           // que la fuente publicó algo y no se interpreta, en vez de arriesgar una cifra inventada.
           if (typeof r.salary === 'string' && r.salary.trim()) pay = { disclosure: 'unparsed', evidence: { field: 'salary', raw: r.salary.trim().slice(0, 500) } };
           break;
+        case 'freehire': {
+          url = r.url; company = r.company; location = r.location;
+          // `posted_at` es el instante de publicación del proveedor. El contrato quiere `YYYY-MM-DD`,
+          // así que se recorta; `publication()` valida el resto. Un adaptador sin fecha hace que el
+          // gate de frescura tumbe el 100% de sus ofertas, y eso costó seis sesiones con greenhouse.
+          date = typeof r.posted_at === 'string' ? r.posted_at.slice(0, 10) : undefined;
+          dateField = 'posted_at';
+          // La descripción viene en HTML, igual que en greenhouse.
+          description = typeof r.description === 'string' ? htmlToText(r.description) : undefined;
+          // `external_id` del proveedor es estable y ya lleva la empresa dentro; el `public_slug`
+          // cambia si cambia el título, así que serviría para deduplicar y no para identificar.
+          id = typeof r.external_id === 'string' ? r.external_id : r.public_slug;
+          mode = r.work_mode === 'remote' ? 'fully_remote' : r.work_mode === 'hybrid' ? 'hybrid' : r.work_mode === 'onsite' ? 'in_person' : undefined;
+          /**
+           * `regions` y `countries` SON las restricciones declaradas del puesto, y por eso van a
+           * `locationRestrictions`: es la forma explícita de lo que un campo de ubicación libre solo
+           * insinúa. La compuerta de geografía las lee junto a `location`, y `REMOTE_COMPATIBLE` ya
+           * reconoce `latam` y `americas`, así que un remoto de la región puntúa en vez de bloquear.
+           */
+          const declared = [...(Array.isArray(r.regions) ? r.regions : []), ...(Array.isArray(r.countries) ? r.countries : [])]
+            .filter((v): v is string => typeof v === 'string' && !!v.trim());
+          if (declared.length) restrictions = [...new Set(declared.map(v => v.trim()))];
+          if (Array.isArray(r.skills)) skills = r.skills.filter((s): s is string => typeof s === 'string' && !!s.trim()).slice(0, 30);
+          /**
+           * `closed_at` es la única señal de cierre que da el proveedor, y se respeta: una oferta
+           * cerrada NO se presenta como disponible. `expiresAt` en el pasado hace que `expiration`
+           * la marque vencida y la verificación la deje `unavailable`, que es lo correcto.
+           */
+          if (typeof r.closed_at === 'string' && r.closed_at.trim()) expires = r.closed_at.slice(0, 10);
+          // El `seniority` del enriquecimiento del proveedor pasa por el MISMO vocabulario que el de
+          // los demás adaptadores: `middle` y `mid` no pueden traducirse distinto según la fuente.
+          const enrichment = typeof r.enrichment === 'object' && r.enrichment ? r.enrichment as Record<string, unknown> : {};
+          levels = seniorityList([enrichment.seniority]);
+          break;
+        }
         case 'greenhouse':
           // first_published, NOT updated_at: the board rewrites updated_at continuously, so it
           // reports every posting as fresh. Measured 2026-09-19 on boards/vercel/jobs (84 jobs):
