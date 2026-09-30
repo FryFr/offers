@@ -72,6 +72,11 @@ export async function runSources(options: { root?: string; enrichModel?: string;
     // para decidir el código de salida.
     const { jobs: _discarded, ...persisted } = result;
     await atomicMailWrite(join(data, 'source-cycle.json'), { ...persisted, provenance, notionPlan: compactNotionPlan(result.notionPlan) });
+    // El resumen de salud va DESPUÉS del checkpoint, nunca antes: así no puede afirmar un ciclo
+    // que no quedó persistido. Si esta escritura falla, `--health` lee el resumen anterior, lo ve
+    // viejo y avisa — que es exactamente lo que debe pasar.
+    await atomicMailWrite(join(data, 'source-health.json'), { version: 1, generatedAt: result.generatedAt,
+      mode: result.mode, confirmed: result.confirmed, health: result.health, counts: result.counts });
     // Estado del proceso, no del checkpoint. Distingue tres casos que antes se colapsaban en
     // exit 5: sin archivo (no hay Notion que verificar), con archivo sin verificar (sí alerta),
     // y con archivo verificado (el planificador decide).
@@ -180,8 +185,20 @@ export async function previewDigest(options: { root?: string; now?: Date; profil
 export type HealthReason = 'no_checkpoint' | 'checkpoint_degraded';
 /** Proporción de fuentes habilitadas que deben estar sanas para considerar utilizable el ciclo. */
 export const HEALTH_QUORUM = 0.8;
+/** Lo único que `sourceHealth` necesita del ciclo, y nada más. Unos pocos KB. */
+interface HealthSnapshot { generatedAt?: string; health?: { status?: string; sourceId?: string }[]; mode?: string; confirmed?: boolean; counts?: unknown }
+/**
+ * Juzga el último ciclo leyendo un archivo de unos KB, no el checkpoint.
+ *
+ * `--health` y `--sync` solo miran fecha, modo y el estado por fuente, pero los sacaban del
+ * checkpoint entero: `readFile` + `JSON.parse` de 427 MB (medido el 2026-09-30) para leer 32
+ * entradas. `--sync` lo hacía DOS veces, una aquí y otra para el store. `runSources` escribe
+ * ahora `data/source-health.json` junto al checkpoint, y este solo se lee si ese archivo no existe
+ * —una instalación cuyo primer ciclo con esta versión aún no ha corrido.
+ */
 export async function sourceHealth(root = repositoryRoot, now = new Date()) {
-  const checkpoint = await optionalJson(join(root, 'data/source-cycle.json')) as { generatedAt?: string; health?: { status?: string; sourceId?: string }[]; mode?: string; confirmed?: boolean; notionPlan?: { records?: unknown[] }; counts?: unknown } | undefined;
+  const checkpoint = (await optionalJson(join(root, 'data/source-health.json'))
+    ?? await optionalJson(join(root, 'data/source-cycle.json'))) as HealthSnapshot | undefined;
   // Un checkpoint ausente no es una degradación: es un ciclo que todavía no ha corrido. Confundirlos
   // convertía cada instalación limpia en una alerta y entrenaba a ignorar el monitor.
   if (checkpoint === undefined) return { healthy: false, reason: 'no_checkpoint' as HealthReason, mode: 'dry-run', confirmed: false, generatedAt: undefined, counts: undefined, quorum: undefined };

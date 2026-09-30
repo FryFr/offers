@@ -504,3 +504,42 @@ test('el plan persistido conserva el motivo de bloqueo en sus dos formas', async
   assert.deepEqual(compactNotionPlan({ mode: 'dry-run', confirmed: false, records: [], blocked: [{ externalKey: key, reason: 'schema_unverified' }] }).blocked,
     [{ externalKey: key, reason: 'schema_unverified' }]);
 });
+
+test('la salud del ciclo se lee de un archivo de KB, no del checkpoint', async () => {
+  // `--health` solo mira fecha, modo y estado por fuente, pero los sacaba de un `JSON.parse` del
+  // checkpoint entero: 427 MB medidos el 2026-09-30 para leer 32 entradas. Y `--sync` lo hacía dos
+  // veces, una aquí y otra para el store.
+  const root = await mkdtemp(join(tmpdir(), 'offers-health-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), '{}');
+    await writeFile(join(root, 'examples/sources.json'), JSON.stringify({ version: 1, sources: [{ id: 'ashby', adapter: 'ashby', enabled: false, board: 'acme', company: 'Acme' }] }));
+    await writeFile(join(root, 'data/offers.json'), JSON.stringify(ingest({ version: 1, records: [] },
+      { title: 'Developer', company: 'Acme', url: 'https://example.com/job', skills: [] })));
+    assert.equal(await sourcesMain(['--dry-run'], root), 0);
+
+    const summary = JSON.parse(await readFile(join(root, 'data/source-health.json'), 'utf8'));
+    assert.equal(summary.version, 1);
+    assert.equal(summary.mode, 'dry-run');
+    assert.ok(Array.isArray(summary.health));
+    // El resumen NO lleva el store ni el plan: si los llevara, no habría ahorrado nada.
+    for (const heavy of ['store', 'notionPlan', 'provenance', 'enrichments', 'jobs']) {
+      assert.equal(heavy in summary, false, `el resumen de salud no debe contener "${heavy}"`);
+    }
+    const checkpointBytes = (await readFile(join(root, 'data/source-cycle.json'), 'utf8')).length;
+    const summaryBytes = (await readFile(join(root, 'data/source-health.json'), 'utf8')).length;
+    assert.ok(summaryBytes < checkpointBytes, 'el resumen debe ser más pequeño que el checkpoint');
+
+    // Con el checkpoint BORRADO, la salud sigue leyéndose: la prueba de que ya no lo parsea.
+    await rm(join(root, 'data/source-cycle.json'));
+    const health = await sourceHealth(root, new Date(summary.generatedAt));
+    assert.equal(health.generatedAt, summary.generatedAt);
+    assert.notEqual(health.reason, 'no_checkpoint', 'con resumen presente no es una instalación limpia');
+
+    // Y sin el resumen, cae al checkpoint: una instalación cuyo primer ciclo nuevo no ha corrido.
+    await rm(join(root, 'data/source-health.json'));
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false,
+      generatedAt: summary.generatedAt, health: [{ sourceId: 'ashby', status: 'ok' }], counts: {} }));
+    assert.equal((await sourceHealth(root, new Date(summary.generatedAt))).healthy, true, 'el respaldo por checkpoint sigue funcionando');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
