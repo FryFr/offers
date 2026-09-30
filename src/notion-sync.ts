@@ -377,19 +377,35 @@ export async function upsertNotionRecords(records: readonly NotionRecord[], valu
         const [page] = await queryExistingPages(record.externalKey, config, transport);
         checked = gate(candidate, now());
         if (checked.status !== 'verified') { reason = 'verification_blocked'; return; }
+        const children = options.body?.(record.externalKey);
         if (page && Object.entries(props).every(([key, v]) => JSON.stringify(comparable(v)) === JSON.stringify(comparable(page.properties[key])))) reason = 'unchanged';
         else {
-          const children = options.body?.(record.externalKey);
           const req = page ? request(config, 'PATCH', `pages/${encodeURIComponent(page.id)}`, { properties: props })
             : createRequest(candidate, config, children);
           const response = await confirmed(transport, req);
           if (response.object !== 'page' || typeof response.id !== 'string' || !response.id || (page && response.id !== page.id)) throw new Error('invalid_response');
           status = page ? 'updated' : 'created';
-          // En una página que ya existía, el cuerpo va aparte y solo si está vacía. Un fallo aquí NO
-          // deshace la escritura de columnas, que ya está confirmada: se reporta y se sigue.
-          if (page && children?.length) {
-            try { bodies[await ensurePageBody(page.id, children, transport)]++; } catch { bodies.failed++; }
-          } else if (!page && children?.length) bodies.written++;
+          // Al CREAR, los bloques viajaron en el mismo POST y no hace falta comprobar nada.
+          if (!page && children?.length) bodies.written++;
+        }
+        /**
+         * El cuerpo de una página EXISTENTE se intenta siempre, también cuando las columnas no
+         * cambiaron.
+         *
+         * Estaba dentro del `else`, así que solo llegaba a las páginas cuyas propiedades se movían.
+         * Medido contra la base real: las 40 páginas más antiguas del tablero seguían VACÍAS después
+         * de varias corridas, porque salían `unchanged` —es lo normal para una fila estable— y el
+         * cuerpo nunca se escribía. Justo las que más lo necesitan, y justo las que la función existe
+         * para rellenar.
+         *
+         * Cuesta un GET por página y por corrida. `ensurePageBody` no reescribe nada cuando ya hay
+         * hijos, y estos registros ya llamaban a la red para consultarla, así que ya van al ritmo.
+         *
+         * Un fallo aquí NO deshace la escritura de columnas, que ya está confirmada: se reporta y se
+         * sigue, porque perder la fila por no poder escribir su cuerpo sería peor.
+         */
+        if (page && children?.length) {
+          try { bodies[await ensurePageBody(page.id, children, transport)]++; } catch { bodies.failed++; }
         }
       });
     } catch (error) {

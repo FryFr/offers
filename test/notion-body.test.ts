@@ -112,3 +112,36 @@ test('el transporte admite leer y AÑADIR bloques, nunca borrarlos', async () =>
   // Y un id que no parece un id tampoco entra.
   await assert.rejects(transport({ method: 'GET', url: 'https://api.notion.com/v1/blocks/../children', headers: {}, body: {} }), /notion_request_rejected/);
 });
+
+test('el cuerpo llega a una página existente aunque sus columnas no cambien', async () => {
+  // Medido contra la base real: las 40 páginas más antiguas del tablero seguían VACÍAS después de
+  // varias corridas. La llamada estaba dentro del `else`, así que solo alcanzaba a las páginas cuyas
+  // propiedades se movían — y una fila estable sale `unchanged`, que es lo normal. Justo las que más
+  // lo necesitan eran las que nunca lo recibían.
+  const { records } = await import('./notion-fixtures.ts');
+  const children = body();
+  let created: Record<string, unknown> | undefined;
+  const setup: HttpTransport = async request => {
+    if (request.url.endsWith('/query')) return { status: 200, body: { object: 'list', has_more: false, results: [] } };
+    created = (request.body as { properties: Record<string, unknown> }).properties;
+    return { status: 200, body: { object: 'page', id: 'page-1' } };
+  };
+  const { upsertNotionRecords, validateNotionConfig } = await import('../src/notion-sync.ts');
+  const config = validateNotionConfig({ enabled: true, dataSourceId: '12345678-1234-1234-1234-123456789012', externalKeyProperty: 'External key' });
+  await upsertNotionRecords(records, config, setup, { now: () => now, body: () => children, limit: 1 });
+  assert.ok(created);
+
+  // La página ya existe con las MISMAS propiedades: sale `unchanged` y su cuerpo está vacío.
+  const calls: string[] = [];
+  const existing: HttpTransport = async request => {
+    calls.push(`${request.method} ${new URL(request.url).pathname}`);
+    if (request.url.endsWith('/query')) return { status: 200, body: { object: 'list', has_more: false, results: [{ object: 'page', id: 'page-1', properties: created }] } };
+    if (request.url.includes('/blocks/') && request.method === 'GET') return { status: 200, body: { object: 'list', results: [] } };
+    return { status: 200, body: { object: 'list', results: children } };
+  };
+  const result = await upsertNotionRecords(records.slice(0, 1), config, existing, { now: () => now, body: () => children });
+  assert.equal(result.records[0]?.reason, 'unchanged', 'las columnas no cambiaron');
+  assert.equal(result.bodies.written, 1, 'y aun así el cuerpo se escribió');
+  assert.ok(calls.some(c => c.startsWith('PATCH /v1/blocks/')), 'se añadieron los bloques');
+  assert.equal(calls.some(c => c.startsWith('PATCH /v1/pages/')), false, 'sin tocar las columnas');
+});
