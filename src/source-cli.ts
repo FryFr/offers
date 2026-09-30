@@ -12,6 +12,8 @@ import { createClaudeEnricher } from './claude-enrichment.ts';
 import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
 import { pageBody } from './notion-body.ts';
+import { boardEvents, readBoard } from './notion-board.ts';
+import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
 import type { Provenance } from './source-adapters.ts';
 import { fetchRegister, registerIndex, type SponsorRegister } from './uk-sponsors.ts';
 import type { SafeReadOptions } from './safe-http.ts';
@@ -156,6 +158,51 @@ export async function vacuumCheckpoint(options: { root?: string; now?: Date; app
     bytesBefore: raw.length, bytesAfter, applied: options.apply === true };
   if (options.apply === true) await atomicMailWrite(path, next);
   return report;
+}
+/**
+ * Lee los `Estado` del tablero y los convierte en eventos de seguimiento.
+ *
+ * Solo LEE de Notion; escribe únicamente `data/tracking.json`. Los eventos son idempotentes por
+ * construcción —el `eventId` lleva el `occurredAt` dentro—, así que correrlo dos veces importa cero
+ * la segunda. Una edición posterior en Notion produce una observación nueva, no un conflicto.
+ */
+export async function pullBoardStatus(options: { root?: string; now?: Date; dryRun?: boolean; dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
+  const root = options.root ?? repositoryRoot, data = join(root, 'data');
+  await mkdir(data, { recursive: true, mode: 0o700 });
+  const local = await optionalJson(join(data, 'notion-local.json')) as { schemaVerified?: unknown; config?: unknown } | undefined;
+  if (!local || local.schemaVerified !== true) throw new Error('notion_sync_disabled');
+  const config = validateNotionConfig(local.config);
+  const now = options.now ?? new Date();
+  const transport = options.dependencies?.transport ?? createNotionTransport(fetch, options.dependencies?.env ?? process.env);
+  const { rows, skipped: unreadable } = await readBoard(config, transport);
+  const { events, skipped, unknownStates } = boardEvents(rows, now);
+  // Un `Estado` que el código no conoce NO se traduce en silencio: adivinar a qué escalón del embudo
+  // corresponde inventaría el dato con el que se va a decidir si esta máquina sirve.
+  if (unknownStates.length) throw new BoardStateUnknown(unknownStates);
+  const summary = { rows: rows.length, events: events.length, skipped: [...unreadable, ...skipped], imported: 0, revision: 0 };
+  if (options.dryRun === true) return summary;
+  // SIN un lock propio: `saveTrackingStore` ya toma `tracking.json.lock` y además comprueba la
+  // revisión esperada releyendo el archivo. Envolverlo en otro `withMailLock` sobre el mismo archivo
+  // se auto-bloqueaba con "Almacén de seguimiento ocupado por otro escritor" —comprobado— porque los
+  // dos compiten por el mismo `.lock`.
+  const path = join(data, 'tracking.json');
+  const store = await loadTrackingStore(path);
+  const next = importTracking(store, { schemaVersion: 1, events });
+  // `importTracking` devuelve la MISMA referencia si nada cambió, y eso es lo que permite no
+  // reescribir el archivo ni gastar una revisión cuando el tablero no se movió.
+  if (next !== store) await saveTrackingStore(path, next, store.revision);
+  return { ...summary, imported: next.events.length - store.events.length, revision: next.revision };
+}
+/** Lleva los valores desconocidos para que el CLI pueda nombrarlos en vez de decir "algo falló". */
+export class BoardStateUnknown extends Error {
+  states: string[];
+  constructor(states: string[]) { super('board_state_unknown'); this.states = states; }
+}
+/** El embudo al corte. Solo lee `data/tracking.json`; no toca la red. */
+export async function applicationFunnel(options: { root?: string; cutoff?: Date } = {}) {
+  const root = options.root ?? repositoryRoot;
+  const store = await loadTrackingStore(join(root, 'data/tracking.json'));
+  return trackingReport(store, options.cutoff ?? new Date());
 }
 export async function computeDigest(options: { root?: string; now?: Date; profilePath?: string } = {}) {
   const root = options.root ?? repositoryRoot, data = join(root, 'data');
@@ -344,6 +391,8 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
     console.log('bin/offers --dry-run [--enrich-model MODEL]   recolecta y persiste el checkpoint\n'
       + 'bin/offers --digest                          entrega el corte del dia (solo lectura)\n'
       + 'bin/offers --vacuum [--dry-run|--apply]      informa (o aplica) la purga del checkpoint\n'
+      + 'bin/offers --pull-status [--dry-run]         lee los Estado del tablero -> eventos de seguimiento\n'
+      + 'bin/offers --funnel [--cutoff TS]            embudo de postulaciones al corte\n'
       + 'bin/offers --probe-source ADAPTADOR TOKEN     sondea un board antes de anadirlo (solo lectura)\n'
       + 'bin/offers --digest-preview [--now TS] [--profile RUTA]\n'
       + '                                             imprime el corte SIN anotarlo: ni ledger, ni metricas\n'
@@ -376,6 +425,32 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
       console.error(message === 'ledger_invalid' ? 'ledger_invalid' : 'digest_failed'); return 4;
     }
+  }
+  if (args[0] === '--pull-status') {
+    const dryRun = args.length === 2 && args[1] === '--dry-run';
+    if (!(args.length === 1 || dryRun)) { console.error('pull_status_arguments'); return 2; }
+    try {
+      console.log(JSON.stringify(await pullBoardStatus({ root, dryRun })));
+      return 0;
+    } catch (error) {
+      // Un `Estado` desconocido sale con su propio código y NOMBRA los valores: "algo falló" obligaría
+      // a abrir Notion a buscar qué select se añadió.
+      if (error instanceof BoardStateUnknown) { console.error(`board_state_unknown: ${error.states.join(', ')}`); return 9; }
+      const message = error instanceof Error ? error.message : '';
+      if (message.includes('existe .lock')) { console.error('source_lock_busy'); return 3; }
+      if (message === 'notion_sync_disabled') { console.error(message); return 5; }
+      console.error(notionFailure(error).code); return 4;
+    }
+  }
+  if (args[0] === '--funnel') {
+    const cutoffAt = args.length === 3 && args[1] === '--cutoff' ? args[2] : undefined;
+    if (!(args.length === 1 || cutoffAt !== undefined)) { console.error('funnel_arguments'); return 2; }
+    const cutoff = cutoffAt ? new Date(cutoffAt) : undefined;
+    if (cutoff && Number.isNaN(cutoff.getTime())) { console.error('funnel_cutoff_invalid'); return 2; }
+    try {
+      console.log(JSON.stringify(await applicationFunnel({ root, ...(cutoff ? { cutoff } : {}) })));
+      return 0;
+    } catch (error) { console.error(error instanceof Error ? error.message : 'funnel_failed'); return 4; }
   }
   if (args[0] === '--vacuum') {
     // `--dry-run` es la forma SEGURA y hay que pedir `--apply` para borrar. Al revés —borrar por

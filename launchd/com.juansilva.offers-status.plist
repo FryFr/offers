@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Lectura del tablero (`bin/offers --pull-status`), diaria 06:40 hora local.
+     Plantilla versionada: el original vive en ~/Library/LaunchAgents, que no se versiona.
+
+     Va por `bin/offers` porque necesita NOTION_API_KEY, igual que el sync: launchd no arranca un
+     shell de login, así que el secreto solo llega por `~/.config/offers/env`.
+
+     A las 06:40, después del digest (06:00) y del sync (:20): así lee un tablero que ya refleja el
+     corte del día. Solo LEE de Notion; lo único que escribe es data/tracking.json.
+
+     Es idempotente por construcción: el `eventId` lleva el `occurredAt` dentro, así que correrlo dos
+     veces importa cero la segunda. Una edición posterior en Notion produce una observación nueva.
+
+     Exit 9 significa que apareció un valor de `Estado` que el código no conoce, y NOMBRA cuál. No es
+     un fallo transitorio: hay que decidir a qué escalón del embudo corresponde y añadirlo a
+     src/notion-board.ts. Traducirlo a ojo inventaría el dato con el que se mide todo esto.
+
+     Los secretos NO van aquí: este archivo está en git. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.juansilva.offers-status</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/juansilva/Documents/offers/bin/offers</string>
+    <string>--pull-status</string>
+  </array>
+  <key>WorkingDirectory</key>   <string>/Users/juansilva/Documents/offers</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>             <integer>6</integer>
+    <key>Minute</key>           <integer>40</integer>
+  </dict>
+  <key>RunAtLoad</key>          <false/>
+  <key>StandardOutPath</key>    <string>/Users/juansilva/Documents/offers/data/logs/status.out.log</string>
+  <key>StandardErrorPath</key>  <string>/Users/juansilva/Documents/offers/data/logs/status.err.log</string>
+  <key>ProcessType</key>        <string>Background</string>
+  <key>LowPriorityIO</key>      <true/>
+  <key>Nice</key>               <integer>5</integer>
+</dict>
+</plist>

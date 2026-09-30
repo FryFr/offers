@@ -130,6 +130,37 @@ date carries a non-ASCII hyphen: LaTeX turns `--` into U+2013 and an ATS that di
 reads `2019-2026` as `20192026`. Hyphenation is disabled for the same reason, after a compiled letter
 was measured to say `min-utes`.
 
+## Closing the loop
+
+```sh
+bin/offers --pull-status --dry-run   # reads the board, imports nothing
+bin/offers --pull-status             # imports; running it again imports 0
+bin/offers --funnel [--cutoff TS]
+```
+
+`Estado` is the only column a person edits, and it is where the funnel comes from. `tracking.ts` is
+reused untouched; the missing piece was the source of events.
+
+Because `Estado` is a single-value select and `validateGraph` requires the `application` event to
+exist before any other, each state implies every event of the states before it: `Rechazada` means
+application plus a negative response, `Entrevista hecha` means application, positive response,
+interview scheduled and interview completed. A state the code does not know is NEVER translated
+silently -- `--pull-status` exits 9 and names the value, because guessing which rung of the funnel it
+belongs to would invent the number this whole machine is measured by.
+
+`Postulada` or beyond without `Applied at` is skipped, never dated by guesswork: `attemptId` derives
+from that date, so inventing it would invent the application's identity.
+
+Idempotence is structural. `importTracking` throws when the same `eventId` arrives with different
+content, so `eventId` hashes `occurredAt` and `recordedAt` equals it -- the invariant that has to hold
+is "same id implies same content". Two earlier designs failed that: the run's clock broke the second
+pull, and `last_edited_time` broke the application event, whose id does not depend on it, as soon as
+any other cell was edited. A later edit in Notion produces a new observation, not a conflict, and
+`trackingReport` counts by `applicationId` with a `Set` so repeated observations never inflate rates.
+
+The funnel counts only COMPLETED interviews, so `Entrevista` does not count yet and `Entrevista
+hecha` does. A scheduled interview can still be cancelled.
+
 ## Health and recovery
 
 CLI exits: 0 completed plan, 2 invalid arguments, 3 occupied lock, 4 configuration/source/persistence/health failure, 5 unverified schema with blocked records, 6 partial source data. An empty or all-disabled cycle can return 0 locally, but health and n8n ingestion checks flag it. Blocked jobs from missing evidence are expected and distinct from failed sources. A fresh health checkpoint requires an enabled healthy source and no failed/partial sources; snapshots older than 24 hours or future-dated snapshots fail. Source failures remain unhealthy during cooldown. Enrichment warnings are visible in local captures and do not redefine source transport health.

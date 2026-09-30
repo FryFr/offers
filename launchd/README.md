@@ -13,12 +13,18 @@ macOS vive en `~/Library/LaunchAgents`, que no se versiona ni se respalda.
 | `com.juansilva.offers-digest` | `--digest` | diaria 06:00 | disponible |
 | `com.juansilva.offers-sponsors` | `--refresh-sponsors` | lunes 05:00 | disponible |
 | `com.juansilva.offers-sync` | `--sync` | cada hora al :20 | disponible |
+| `com.juansilva.offers-status` | `--pull-status` | diaria 06:40 | disponible |
 
 **El agente de sync es el único que se invoca por `bin/offers`** y no por `node` directo. No es una
 inconsistencia: es el único comando que necesita `NOTION_API_KEY`, y launchd no arranca un shell de
 login, así que ni `~/.zshrc` ni `~/.zprofile` se leen y una variable exportada en la terminal no
 llega. `bin/offers` es quien carga `~/.config/offers/env` y quien **rechaza** ese archivo si no tiene
 permisos 600 o 400.
+
+`--pull-status` va por `bin/offers` por lo mismo, y a las 06:40: después del digest (06:00) y del
+sync (:20), así lee un tablero que ya refleja el corte del día. **Exit 9 significa que apareció un
+`Estado` que el código no conoce**, y el log nombra cuál. No es transitorio: hay que decidir a qué
+escalón del embudo corresponde y añadirlo a `src/notion-board.ts`.
 
 Corre al minuto :20 para no solaparse con el ciclo del :00. Ya no compiten por el lock del
 checkpoint —el sync solo lo toma unos segundos, para leer— pero escalonar la carga de red no cuesta
