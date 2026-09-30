@@ -469,3 +469,34 @@ test('el sync NUNCA nombra una columna del tablero, ni al crear ni al actualizar
   assert.equal(second.records[0]?.reason, 'unchanged');
   assert.deepEqual(sent, [], 'no se envio ni una peticion de escritura');
 });
+
+test('el tope cuenta peticiones a Notion, no registros que el gate bloquea', async () => {
+  // Medido el 2026-09-30 contra la base real: 854 relevantes, `skipped: 854`, `created: 0`. El
+  // `--limit 5` gastó su presupuesto en cinco registros cuya disponibilidad estaba vencida y que el
+  // gate bloquea SIN tocar la red. Es la misma lección que el ritmo aprendió antes.
+  // Se construyen por el pipeline, no a mano: cambiar `externalKey` sobre un registro existente
+  // rompe la comprobación de identidad y saldría `invalid_record`, que es otra cosa.
+  const vencidos = report(ingest({ version: 1, records: [] }, Array.from({ length: 5 }, (_, i) => ({
+    ...evidence, source: 'test', externalId: `vencido-${i}`, title: 'Developer', company: 'Acme',
+    availability: { ...evidence.availability, checkedAt: '2026-09-10T12:00:00Z' } }))), parseProfile({}), now).notion.records;
+  const bloqueados = vencidos;
+  let writes = 0;
+  const transport: HttpTransport = async request => {
+    if (request.url.endsWith('/query')) return list([]);
+    writes++;
+    return { status: 200, body: { object: 'page', id: `page-${writes}` } };
+  };
+  // Cinco bloqueados delante y uno escribible detrás: con el tope en 1, el escribible SÍ pasa.
+  const result = await upsertNotionRecords([...bloqueados, records[0]!], config, transport, { limit: 1 });
+  assert.equal(result.created, 1, 'el presupuesto no lo gastan los que no llaman a la red');
+  assert.equal(writes, 1);
+  assert.equal(result.records.filter(r => r.reason === 'verification_blocked').length, 5);
+  assert.equal(result.records.filter(r => r.reason === 'batch_limit').length, 0, 'nadie quedó fuera por tope');
+
+  // Y el tope SÍ acota las escrituras reales: dos escribibles con tope 1 dejan una fuera.
+  writes = 0;
+  const dos = [records[0]!, records[1]!];
+  const acotado = await upsertNotionRecords(dos, config, transport, { limit: 1 });
+  assert.equal(writes, 1);
+  assert.equal(acotado.records.filter(r => r.reason === 'batch_limit').length, 1);
+});

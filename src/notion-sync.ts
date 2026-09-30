@@ -331,8 +331,17 @@ export async function upsertNotionRecords(records: readonly NotionRecord[], valu
   const bodies = { written: 0, already_present: 0, empty_body: 0, failed: 0 };
   const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, bodies, records: [] };
   const seen = new Set<string>();
-  let attempted = 0;
-  // Registros que de verdad llamaron a Notion; solo entre ellos hace falta el ritmo.
+  /**
+   * Registros que de verdad LLAMARON a Notion. El tope los cuenta a ellos, no a los intentos.
+   *
+   * Antes se incrementaba al entrar al registro, así que un `--sync --limit 5` podía gastar su
+   * presupuesto entero en cinco registros que el gate de verificación bloquea sin tocar la red y no
+   * escribir nada. Medido el 2026-09-30 contra la base real: 854 relevantes, `skipped: 854`,
+   * `created: 0`, porque los cinco primeros del array tenían la disponibilidad vencida.
+   *
+   * Es la MISMA lección que el ritmo aprendió antes: el presupuesto acota peticiones, y un registro
+   * que no llega a la red no gasta ninguna.
+   */
   let paced = 0;
   for (const [index, record] of records.entries()) {
     let status: SyncResult['records'][number]['status'] = 'skipped';
@@ -342,11 +351,10 @@ export async function upsertNotionRecords(records: readonly NotionRecord[], valu
     if (!config.enabled) reason = 'sync_disabled';
     // Pasado el tope, los registros restantes se reportan, no se descartan en silencio: hay que
     // poder ver cuántos quedaron fuera y por qué.
-    else if (options.limit !== undefined && attempted >= options.limit) reason = 'batch_limit';
+    else if (options.limit !== undefined && paced >= options.limit) reason = 'batch_limit';
     else if (seen.has(record.externalKey)) reason = 'duplicate_in_batch';
     else try {
       seen.add(record.externalKey);
-      attempted++;
       await exclusively(`${config.dataSourceId ?? config.databaseId}:${record.externalKey}`, async () => {
         let candidate = structuredClone(record);
         checked = gate(candidate, now());
