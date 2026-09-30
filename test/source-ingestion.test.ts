@@ -660,3 +660,41 @@ test('--probe-source no exige token a un agregador, que no lo tiene', async () =
   assert.match(aggregator!.endpoint, /^https:\/\/freehire\.me\/api\/v1\//);
   assert.equal(aggregator!.availabilityTrust, 'ambiguous', 'un agregador no confirma disponibilidad por estar en el feed');
 });
+
+test('un fallo a mitad de la paginación conserva lo recogido; en la primera página sí es un fallo', async () => {
+  // Medido el 2026-09-30 sobre himalayas: sirve 16 páginas a ~55 ms y entonces deja la conexión
+  // colgada hasta el timeout, SIN devolver 429. Es el proveedor frenándonos, no una avería.
+  // Tratarlo como excepción tiraba las 300 ofertas ya obtenidas y marcaba `failed` una fuente que
+  // aportaba el 80% del digest.
+  const row = JSON.parse(await fixture('lever.json'))[0];
+  const page = Array.from({ length: 100 }, (_, i) => ({ ...row, id: `job-${i}`, hostedUrl: `https://jobs.lever.co/acme/job-${i}` }));
+  let calls = 0;
+  const result = await collectSource(source('lever'), now, { resolveHost: resolver, transport: async () => {
+    if (++calls === 1) return response(JSON.stringify(page));
+    throw new Error('request_timeout');
+  } });
+  assert.equal(calls, 2, 'se intentó la segunda página');
+  assert.equal(result.jobs.length, 100, 'lo de la primera página se conserva');
+  assert.equal(result.stopped, 'paged_request_timeout', 'y se dice por qué se dejó de pedir');
+
+  // En la PRIMERA página no hay nada que conservar: eso sí es un fallo de la fuente.
+  await assert.rejects(collectSource(source('lever'), now, { resolveHost: resolver,
+    transport: async () => { throw new Error('request_timeout'); } }), /request_timeout/);
+
+  // Un estado HTTP no-200 a mitad se trata igual: se para y se nombra.
+  calls = 0;
+  const conError = await collectSource(source('lever'), now, { resolveHost: resolver, transport: async () => {
+    if (++calls === 1) return response(JSON.stringify(page));
+    return { status: 429, headers: { 'content-type': 'application/json' }, body: '{}' };
+  } });
+  assert.equal(conError.jobs.length, 100);
+  assert.equal(conError.stopped, 'paged_http_429');
+
+  // Y el ciclo lo reporta `partial` con su motivo, no como un `ok` limpio.
+  calls = 0;
+  const cycle = await runSourceCycle({ sources: [source('lever')], profile, store: { version: 1, records: [] }, now, mode: 'dry-run',
+    resolveHost: resolver, transport: async () => { if (++calls === 1) return response(JSON.stringify(page)); throw new Error('request_timeout'); } });
+  assert.equal(cycle.health[0]!.status, 'partial');
+  assert.equal(cycle.health[0]!.reason, 'paged_request_timeout');
+  assert.equal(cycle.health[0]!.fetched, 100);
+});

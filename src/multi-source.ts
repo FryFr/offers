@@ -41,6 +41,8 @@ export function deduplicate(jobs: readonly CapturedJob[]): CapturedJob[] {
 export async function collectSource(source: Source, now: Date, options: SafeReadOptions & { env?: NodeJS.ProcessEnv; htmlFetch?: CaptureFetch } = {}) {
   let endpoint = source.endpoint; const jobs: CapturedJob[] = []; let rejected = 0;
   const seenIds = new Set<string>();
+  /** Por qué se dejó de paginar, cuando no fue por llegar al final. */
+  let stopped: string | undefined;
   for (let page = 0; page < 50; page++) {
     // Un listado de Greenhouse con `content=true` incluye el HTML de cada oferta y llega a ~10 MB
     // (medido 2026-09-20: databricks 9,6 MB, anthropic 8,9 MB). El cap global de 2 MB existe para
@@ -48,11 +50,37 @@ export async function collectSource(source: Source, now: Date, options: SafeRead
     // falta, con techo duro, en vez de renunciar a la descripción del 70% del pool.
     // Arbeitnow entrega 250 ofertas con descripción en una sola respuesta: 2,21 MB medidos, justo
     // por encima del cap. Un listado legítimo no debería quedar fuera por 200 KB.
-    const heavyListing = (source.adapter === 'greenhouse' && source.fetchContent) || source.adapter === 'arbeitnow';
-    const response = await safeRead(endpoint, { ...options, headers: { 'user-agent': USER_AGENT, ...sourceHeaders(source, options.env ?? process.env) },
-      ...(heavyListing ? { maxBytes: 16_000_000, timeoutMs: 30_000 } : {}),
-      contentTypes: source.adapter === 'rss' ? ['application/rss+xml', 'application/xml', 'text/xml'] : ['application/json'] });
-    if (response.status !== 200) throw new Error(response.status === 429 ? 'source_rate_limited' : 'source_http_error');
+    // Y lo mismo le pasó a WeWorkRemotely al crecer: medido el 2026-09-30, su feed pesa 2.212.066
+    // bytes y el ciclo lo reportaba `failed` con `response_too_large` desde días atrás. Un feed RSS
+    // con descripciones no cabe en 2 MB, y perder la mejor fuente remota por 200 KB no es una
+    // protección, es una fuga. El techo duro de 16 MB sigue acotando el peor caso.
+    // freehire devuelve ~1 MB por página de 100 con descripción completa, así que le sobra el cap
+    // normal; se agrupa aquí solo por el tiempo, porque son 20 páginas por ciclo.
+    const heavyListing = (source.adapter === 'greenhouse' && source.fetchContent) || source.adapter === 'arbeitnow' || source.adapter === 'rss';
+    /**
+     * Un fallo de red A MITAD de la paginación detiene el recorrido y conserva lo ya recogido; solo
+     * el de la PRIMERA página es un fallo de la fuente.
+     *
+     * Medido el 2026-09-30 sobre himalayas: sirve 16 páginas a ~55 ms cada una y entonces deja la
+     * conexión colgada hasta que vence el timeout, sin devolver 429. Es el proveedor frenándonos, no
+     * una avería. Tratarlo como excepción tiraba las 300 ofertas ya obtenidas, marcaba la fuente
+     * `failed` y la bajaba del quórum — y himalayas era el 80% del digest. Mismo criterio que agotar
+     * el presupuesto de páginas: se tomaron las más frescas y se deja de pedir.
+     */
+    let response;
+    try {
+      response = await safeRead(endpoint, { ...options, headers: { 'user-agent': USER_AGENT, ...sourceHeaders(source, options.env ?? process.env) },
+        ...(heavyListing ? { maxBytes: 16_000_000, timeoutMs: 30_000 } : {}),
+        contentTypes: source.adapter === 'rss' ? ['application/rss+xml', 'application/xml', 'text/xml'] : ['application/json'] });
+    } catch (error) {
+      if (!jobs.length) throw error;
+      stopped = `paged_${error instanceof Error ? error.message : 'read_failed'}`;
+      break;
+    }
+    if (response.status !== 200) {
+      if (jobs.length) { stopped = `paged_http_${response.status}`; break; }
+      throw new Error(response.status === 429 ? 'source_rate_limited' : 'source_http_error');
+    }
     const adapted = adaptSource(source, response.body, now, response.finalUrl);
     rejected += adapted.rejected;
     const paging = PAGINATION[source.adapter];
@@ -98,7 +126,7 @@ export async function collectSource(source: Source, now: Date, options: SafeRead
       if (capture.publishedAt) { job.opportunity.publishedAt = capture.publishedAt; job.opportunity.publicationEvidence = capture.publicationEvidence; }
     }
   }
-  return { jobs, rejected };
+  return { jobs, rejected, ...(stopped ? { stopped } : {}) };
 }
 /**
  * Cómo pagina cada proveedor. Antes esto estaba incrustado en tres condicionales con el nombre
@@ -108,6 +136,9 @@ type Pagination = { style: 'offset'; param: string; pageSize: number } | { style
 const PAGINATION: Partial<Record<Source['adapter'], Pagination>> = {
   lever: { style: 'offset', param: 'skip', pageSize: 100 },
   himalayas: { style: 'cursor', param: 'cursor' },
+  // freehire pagina por `offset` y acota la profundidad a `offset + limit <= 10000`; con el tope de
+  // 2.000 filas por fuente nunca se llega a ese borde.
+  freehire: { style: 'offset', param: 'offset', pageSize: 100 },
 };
 /** Techo por fuente y ciclo. Himalayas publica 105.000 ofertas: paginar hasta el fondo no es opción. */
 const MAX_ROWS_PER_SOURCE = 2_000;
@@ -152,8 +183,12 @@ export async function runSourceCycle(options: CycleOptions) {
     try {
       const result = await collectSource(source, now, options);
       captures.push(...result.jobs);
-      state.lastResult[source.id] = result.rejected ? 'partial' : 'ok';
-      health.push({ ...base, status: result.rejected ? 'partial' : 'ok', fetched: result.jobs.length, rejected: result.rejected });
+      // `partial` también cuando la paginación se detuvo sola: se trajo material utilizable pero no
+      // todo lo que había, y eso tiene que verse con su motivo en vez de pasar por un `ok` limpio.
+      const degraded = result.rejected > 0 || result.stopped !== undefined;
+      state.lastResult[source.id] = degraded ? 'partial' : 'ok';
+      health.push({ ...base, status: degraded ? 'partial' : 'ok', fetched: result.jobs.length, rejected: result.rejected,
+        ...(result.stopped ? { reason: result.stopped } : {}) });
     } catch (error) {
       state.lastResult[source.id] = 'failed';
       const code = error instanceof Error ? error.message : '';

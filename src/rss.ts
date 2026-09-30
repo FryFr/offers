@@ -10,8 +10,18 @@ function decode(text: string): string {
     return String.fromCodePoint(code);
   });
 }
-export function parseRss(xml: string): Record<string, string>[] {
-  if (Buffer.byteLength(xml) > 2_000_000 || /<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error('rss_unsafe_xml');
+/**
+ * Techo de tamaño del parser. Es SUYO, no el del transporte: elevar el del transporte no servía de
+ * nada mientras este siguiera en 2 MB. Medido el 2026-09-30, el feed de WeWorkRemotely pesa
+ * 2.212.066 bytes y llevaba días reportándose `failed`; era la mejor fuente remota del pool.
+ */
+export const RSS_MAX_BYTES = 16_000_000;
+export function parseRss(xml: string, maxBytes = RSS_MAX_BYTES): Record<string, string>[] {
+  // El tamaño y el XML peligroso se reportan APARTE. Estaban en la misma condición, así que un feed
+  // grande y perfectamente válido salía como `rss_unsafe_xml` y el diagnóstico mentía: se buscaba
+  // un DOCTYPE inyectado donde solo había 200 KB de más.
+  if (Buffer.byteLength(xml) > maxBytes) throw new Error('rss_too_large');
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error('rss_unsafe_xml');
   const root: Element = { name: '', text: '', children: [] }, stack = [root];
   const tokens = /<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<[^>]*>|[^<]+/g;
   let offset = 0, count = 0;
