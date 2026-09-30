@@ -31,9 +31,15 @@ export interface CandidacyBrief {
     url?: string;
   };
   match: {
+    /** Halladas en el TEXTO de la oferta con alias, vía `relevance.skillsMatched`. */
     matched: string[];
-    missing: string[];
+    /** Habilidades del perfil sin rastro en el texto de la oferta. */
+    absent: string[];
+    /** Las que la oferta SÍ declaró en un campo estructurado y el candidato no tiene. */
+    declaredMissing: string[];
     ratio: number | null;
+    /** De dónde salió el cruce. Explícito para que nadie lo confunda con `opportunity.skills`. */
+    basis: 'offer_text';
   };
 }
 
@@ -108,19 +114,40 @@ export function parseCandidateFacts(value: unknown): CandidateFacts {
   return result;
 }
 
-/** Build only for verified records that have not been discarded or found ineligible. */
-export function buildCandidacyBrief(record: CandidacyRecord, candidate: CandidateFacts): CandidacyBrief | null {
+/** Tiers de relevancia que producen material de postulación. Los mismos que llegan al tablero. */
+export const CANDIDACY_TIERS: readonly string[] = ['strong', 'possible'];
+/**
+ * Construye el brief solo para lo que de verdad vale una candidatura.
+ *
+ * El cruce de habilidades se hace contra el TEXTO de la oferta, reutilizando el
+ * `relevance.skillsMatched` que el pipeline ya calculó con alias. Antes se cruzaba por igualdad
+ * exacta contra `record.opportunity.skills`, y siete de los diez adaptadores dejan ese campo vacío
+ * —incluidos los TRES ATS, que son las fuentes de mayor confianza—, así que para cualquier oferta
+ * de un board la proporción salía `null` y la ficha de coincidencia quedaba muerta justo en las
+ * mejores ofertas. `evaluate.ts` documentó esta misma lección y la arregló para el score; este
+ * módulo nunca recibió el arreglo.
+ *
+ * El gate añade el tier: sin él, esto genera una carpeta por cada registro verificado del histórico.
+ */
+export function buildCandidacyBrief(record: CandidacyRecord, candidate: CandidateFacts, options: { tiers?: readonly string[] } = {}): CandidacyBrief | null {
   if (record.evaluation.verification.status !== 'verified'
     || record.evaluation.screening.status === 'discarded'
-    || record.evaluation.screening.employment.status === 'ineligible') return null;
-  const required = [...new Set(record.opportunity.skills)].sort(compareText);
+    || record.evaluation.screening.employment.status === 'ineligible'
+    || !(options.tiers ?? CANDIDACY_TIERS).includes(record.evaluation.relevance.tier)) return null;
+  const relevance = record.evaluation.relevance;
   const candidateSkills = new Set(candidate.skills);
-  const matched = required.filter(skill => candidateSkills.has(skill));
-  const missing = required.filter(skill => !candidateSkills.has(skill));
+  // Lo hallado en el texto: núcleo y secundarias juntas, porque para una carta las dos son evidencia.
+  const matched = [...new Set([...relevance.skillsMatched, ...relevance.secondaryMatched])].sort(compareText);
+  const found = new Set(matched);
+  const absent = [...candidateSkills].filter(skill => !found.has(skill)).sort(compareText);
+  // Lo que la oferta declaró en un campo estructurado y el candidato no tiene. Casi siempre vacío
+  // porque casi ningún adaptador puebla `skills`, y por eso ya no manda en la proporción.
+  const declared = [...new Set(record.opportunity.skills)].sort(compareText);
+  const declaredMissing = declared.filter(skill => !candidateSkills.has(skill));
   const opportunity = {
     title: record.opportunity.title,
     company: record.opportunity.company,
-    skills: required,
+    skills: declared,
     ...(record.opportunity.url ? { url: record.opportunity.url } : {}),
   };
   return {
@@ -128,7 +155,10 @@ export function buildCandidacyBrief(record: CandidacyRecord, candidate: Candidat
     opportunityId: record.id,
     candidate: structuredClone(candidate),
     opportunity,
-    match: { matched, missing, ratio: required.length ? matched.length / required.length : null },
+    // La proporción es sobre las habilidades DEL CANDIDATO: cuánto de lo que sabe pide esta oferta.
+    // Sobre las declaradas por la oferta daba `null` en el 70% del pool.
+    match: { matched, absent, declaredMissing, basis: 'offer_text',
+      ratio: candidateSkills.size ? matched.length / candidateSkills.size : null },
   };
 }
 
@@ -138,7 +168,10 @@ const list = (values: readonly string[], empty: string) => values.length ? value
 /** Render a review scaffold; it never composes claims beyond the supplied facts. */
 export function renderCandidacyMarkdown(brief: CandidacyBrief): string {
   const { candidate, opportunity, match } = brief;
-  const ratio = match.ratio === null ? '[POR REVISAR: la vacante no declara habilidades]' : `${match.matched.length}/${opportunity.skills.length} (${(match.ratio * 100).toFixed(0)}%)`;
+  // El denominador son las habilidades DEL CANDIDATO, no las que la oferta declare: esas están
+  // vacías en el 70% del pool y hacían que la proporción saliera `null` justo en las mejores ofertas.
+  const ratio = match.ratio === null ? '[POR REVISAR: no hay habilidades declaradas en tus hechos]'
+    : `${match.matched.length}/${match.matched.length + match.absent.length} (${(match.ratio * 100).toFixed(0)}%)`;
   const contact = [candidate.contact?.email, candidate.contact?.phone, ...(candidate.contact?.links ?? [])].filter((value): value is string => !!value);
   return `# Candidatura: ${inline(opportunity.title)} — ${inline(opportunity.company)}
 
@@ -149,15 +182,17 @@ export function renderCandidacyMarkdown(brief: CandidacyBrief): string {
 - ID: \`${brief.opportunityId}\`
 - URL: ${opportunity.url ? inline(opportunity.url) : '[POR COMPLETAR: URL de la vacante]'}
 
-## Coincidencia declarada
+## Coincidencia con el texto de la oferta
 
-- Proporción: ${ratio}
-- Coincidencias:
-${list(match.matched, 'ninguna habilidad declarada coincide')}
-- Sin respaldo en CandidateFacts:
-${list(match.missing, 'ninguna habilidad declarada pendiente')}
+- Proporción de tus habilidades que esta oferta pide: ${ratio}
+- Halladas en el texto de la oferta:
+${list(match.matched, 'ninguna de tus habilidades aparece en el texto')}
+- Tuyas sin rastro en esta oferta:
+${list(match.absent, 'todas tus habilidades aparecen')}
+- Declaradas por la oferta y sin respaldo en tus hechos:
+${list(match.declaredMissing, 'la oferta no declara habilidades estructuradas')}
 
-La comparación anterior usa coincidencia exacta entre las habilidades declaradas; no demuestra dominio ni descarta habilidades equivalentes.
+El cruce se hace sobre el texto publicado, con alias, y prueba que el término APARECE; no demuestra dominio ni descarta habilidades equivalentes que la oferta nombre de otra forma.
 
 ## Hechos del candidato
 

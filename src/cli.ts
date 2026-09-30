@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { parseProfile, parseOpportunity } from './contracts.ts';
 import { captureEvidence, createNodeCaptureFetch } from './evidence-capture.ts';
 import { ingest, parseStore, report, type Store } from './pipeline.ts';
-import { buildCandidacyBrief, parseCandidateFacts, writeCandidacyBriefs } from './candidacy.ts';
+import { buildCandidacyBrief, parseCandidateFacts, writeCandidacyBriefs, CANDIDACY_TIERS } from './candidacy.ts';
 import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
 
 const help = `Offers: entrada manual local; Notion opcional y desactivado por defecto.
@@ -34,7 +34,8 @@ Un fallo de captura por registro no aborta el lote; el registro queda sin cambio
 Solo verified se recomienda/sincroniza: publicación verificable de hoy o hace 1-3 días UTC.
 Hoy tiene prioridad. >3 días: stale; cerrada/404/410/desaparecida: unavailable.
 Sin fecha/evidencia, respuesta ambigua, timeout o verificación vencida: unknown.
---candidate activa briefs Markdown locales; --candidacy-dir solo puede usarse con ese flag.
+--candidate activa el material de postulación local; --candidacy-dir solo puede usarse con ese flag.
+Solo se genera para ofertas strong o possible, las mismas que llegan al tablero; --candidacy-tier weak baja el listón.
 Solo genera para verified, no discarded y no ineligible. Nunca envía candidaturas.
 La disponibilidad exige evidencia explícita de ficha abierta y HTTP 200; vigencia <24h.
 Migración: añadir publishedAt, publicationEvidence y availability tras verificarlos.
@@ -63,7 +64,7 @@ async function main() {
       options.set(key, 'true'); continue;
     }
     const value = args[++i];
-    if (!['--input-format', '--input', '--profile', '--state', '--output', '--now', '--candidate', '--candidacy-dir', '--notion-config', '--notion-transport', '--tracking-state', '--tracking-import', '--tracking-record', '--tracking-cutoff'].includes(key) || !value || value.startsWith('--') || options.has(key)) throw new Error(`Argumento inválido\n${help}`);
+    if (!['--input-format', '--input', '--profile', '--state', '--output', '--now', '--candidate', '--candidacy-dir', '--candidacy-tier', '--notion-config', '--notion-transport', '--tracking-state', '--tracking-import', '--tracking-record', '--tracking-cutoff'].includes(key) || !value || value.startsWith('--') || options.has(key)) throw new Error(`Argumento inválido\n${help}`);
     options.set(key, value);
   }
   const inputFormat = options.get('--input-format') ?? 'opportunities';
@@ -73,7 +74,7 @@ async function main() {
   const trackingRecord = options.get('--tracking-record');
   const trackingMode = !!trackingState || !!trackingImport || !!trackingRecord || options.has('--tracking-report') || options.has('--tracking-cutoff');
   if (trackingMode) {
-    if (!trackingState || (trackingImport && trackingRecord) || ['--input-format', '--input', '--state', '--profile', '--candidate', '--candidacy-dir', '--notion-config', '--notion-transport', '--notion-sync', '--notion-dry-run', '--now', '--capture-evidence'].some(key => options.has(key))) throw new Error(`Modo de seguimiento inválido o mezclado con el flujo de ofertas\n${help}`);
+    if (!trackingState || (trackingImport && trackingRecord) || ['--input-format', '--input', '--state', '--profile', '--candidate', '--candidacy-dir', '--candidacy-tier', '--notion-config', '--notion-transport', '--notion-sync', '--notion-dry-run', '--now', '--capture-evidence'].some(key => options.has(key))) throw new Error(`Modo de seguimiento inválido o mezclado con el flujo de ofertas\n${help}`);
     if (!trackingImport && !trackingRecord && !options.has('--tracking-report')) throw new Error('--tracking-state requiere importar, registrar o reportar');
     const cutoffText = options.get('--tracking-cutoff') ?? new Date().toISOString();
     const cutoff = new Date(cutoffText);
@@ -108,6 +109,11 @@ async function main() {
   const profilePath = options.get('--profile');
   const candidatePath = options.get('--candidate');
   if (options.has('--candidacy-dir') && !candidatePath) throw new Error('--candidacy-dir requiere --candidate');
+  // Escape para bajar el listón a mano. Solo admite `weak`: `off_target` lleva un bloqueo —rol
+  // excluido, seniority por debajo del piso o geografía incompatible— y generar material para eso
+  // sería redactar una candidatura que el propio ranker ya declaró inaplicable.
+  const candidacyTier = options.get('--candidacy-tier');
+  if (candidacyTier !== undefined && candidacyTier !== 'weak') throw new Error('--candidacy-tier solo admite weak');
   const candidacyDirectory = candidatePath ? resolve(options.get('--candidacy-dir') ?? 'output/candidacy') : undefined;
   if (candidacyDirectory) {
     const fromDrafts = relative(resolve('drafts'), candidacyDirectory);
@@ -166,8 +172,12 @@ async function main() {
   }
   // Each file is atomic. They are not a shared transaction; rerunning repairs output.
   if (candidate && candidacyDirectory) {
+    // El tier entra al gate: sin él esto escribe una carpeta por CADA registro verificado del
+    // histórico —hoy serían cientos—, y `writeCandidacyBriefs` nunca borra huérfanos, así que el
+    // directorio solo crecería. El escape `--candidacy-tier weak` existe para bajar el listón a mano.
+    const tiers = candidacyTier ? [...CANDIDACY_TIERS, candidacyTier] : undefined;
     const briefs = result.records.flatMap(record => {
-      const brief = buildCandidacyBrief(record, candidate);
+      const brief = buildCandidacyBrief(record, candidate, ...(tiers ? [{ tiers }] : []));
       return brief ? [brief] : [];
     });
     await writeCandidacyBriefs(candidacyDirectory, briefs);

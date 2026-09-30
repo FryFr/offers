@@ -9,7 +9,9 @@ import { parseOpportunity, parseProfile, type Opportunity } from '../src/contrac
 import { identity, ingest, report, type Store } from '../src/pipeline.ts';
 
 const now = new Date('2026-09-16T12:00:00Z');
-const profile = parseProfile({ skills: ['typescript'] });
+// El perfil DECLARA el rol que busca. Sin eso las ofertas caen en `weak` y el gate nuevo —que
+// exige el mismo tier que llega al tablero de Notion— no genera material para ninguna.
+const profile = parseProfile({ skills: ['typescript'], relevance: { roleTerms: ['developer'] } });
 const factsInput = {
   schemaVersion: 1,
   name: ' Example Candidate ',
@@ -26,7 +28,12 @@ const evidence = {
   publicationEvidence: { url: 'https://example.com/job', excerpt: 'Published today', observedAt: now.toISOString() },
   availability: { url: 'https://example.com/job', checkedAt: now.toISOString(), outcome: 'open' as const, httpStatus: 200, evidence: 'Application form is open' },
 };
-const opportunity = (overrides: Partial<Opportunity> = {}) => parseOpportunity({ title: 'Developer', company: 'Acme', kind: 'freelance', skills: ['TypeScript', 'Python'], ...evidence, ...overrides });
+// La descripción existe a propósito: es donde el cruce busca ahora. Sin ella, `skills` era el único
+// sitio con "TypeScript", y una oferta con `skills: []` —el 70% del pool real— no coincidía en nada.
+// Menciona typescript y NO node.js, para que `absent` tenga algo que reportar.
+const opportunity = (overrides: Partial<Opportunity> = {}) => parseOpportunity({ title: 'Developer', company: 'Acme', kind: 'freelance',
+  description: 'We are hiring a developer to build TypeScript services for a distributed team.',
+  skills: ['TypeScript', 'Python'], ...evidence, ...overrides });
 const record = (overrides: Partial<Opportunity> = {}) => report(ingest({ version: 1, records: [] } satisfies Store, opportunity(overrides)), profile, now).records[0]!;
 
 test('CandidateFacts usa un contrato cerrado, versionado y normalizado', () => {
@@ -49,15 +56,37 @@ test('CandidateFacts usa un contrato cerrado, versionado y normalizado', () => {
   assert.throws(() => parseCandidateFacts({ ...factsInput, skills: sparse }), /candidate\.skills\[0\]/);
 });
 
-test('buildCandidacyBrief es puro y calcula matched, missing y ratio sin inferencias', () => {
+test('el cruce va contra el TEXTO de la oferta, no contra un array que los adaptadores dejan vacío', () => {
+  // Siete de los diez adaptadores dejan `opportunity.skills` en `[]`, y los TRES ATS —las fuentes
+  // de mayor confianza— están todos en ese grupo. Cruzar por igualdad exacta contra ese campo daba
+  // `ratio: null` para cualquier oferta de un board: la ficha moría en las mejores ofertas.
   const source = record();
   const before = structuredClone(source);
   const brief = buildCandidacyBrief(source, facts)!;
-  assert.deepEqual(brief.match, { matched: ['typescript'], missing: ['python'], ratio: 0.5 });
-  assert.deepEqual(source, before);
-  assert.deepEqual(buildCandidacyBrief(source, facts), brief);
-  assert.equal(buildCandidacyBrief(record({ skills: [] }), facts)?.match.ratio, null);
-  assert.deepEqual(buildCandidacyBrief(record({ skills: [] }), facts)?.match.missing, []);
+  assert.equal(brief.match.basis, 'offer_text');
+  assert.deepEqual(brief.match.matched, ['typescript'], 'hallada en el texto, con alias');
+  assert.deepEqual(brief.match.absent, ['node.js'], 'declarada por el candidato y ausente del texto');
+  assert.deepEqual(brief.match.declaredMissing, ['python'], 'declarada por la oferta y sin respaldo');
+  // La proporción es sobre las habilidades del CANDIDATO: cuánto de lo que sabe pide esta oferta.
+  assert.equal(brief.match.ratio, 0.5);
+  assert.deepEqual(source, before, 'no muta el record');
+  assert.deepEqual(buildCandidacyBrief(source, facts), brief, 'determinista');
+
+  // LA PRUEBA QUE FIJA EL ARREGLO: una oferta SIN habilidades declaradas —el 70% del pool— sigue
+  // produciendo una proporción real, porque el cruce ya no depende de ese campo.
+  const sinDeclarar = buildCandidacyBrief(record({ skills: [] }), facts)!;
+  assert.equal(sinDeclarar.match.ratio, 0.5, 'la proporción sobrevive a un array vacío');
+  assert.deepEqual(sinDeclarar.match.matched, ['typescript']);
+  assert.deepEqual(sinDeclarar.match.declaredMissing, []);
+});
+
+test('el gate exige el mismo tier que llega al tablero, con escape explícito', () => {
+  // Sin el tier, esto genera una carpeta por cada registro verificado del histórico.
+  const debil = parseProfile({ skills: ['typescript'] });
+  const flojo = report(ingest({ version: 1, records: [] } satisfies Store, opportunity()), debil, now).records[0]!;
+  assert.equal(flojo.evaluation.relevance.tier, 'weak');
+  assert.equal(buildCandidacyBrief(flojo, facts), null, 'una oferta weak no merece un paquete');
+  assert.ok(buildCandidacyBrief(flojo, facts, { tiers: ['strong', 'possible', 'weak'] }), 'y el escape existe');
 });
 
 test('el gate solo admite verified, no discarded y no ineligible', () => {
@@ -102,10 +131,14 @@ test('CLI opt-in genera solo briefs elegibles y no toca drafts', async () => {
     const statePath = join(directory, 'state.json');
     const candidacyDirectory = join(directory, 'candidacy');
     await writeFile(candidatePath, `${JSON.stringify(factsInput)}\n`);
+    // El perfil se pasa explícito: el gate exige tier `strong` o `possible`, y con el perfil por
+    // defecto —sin habilidades ni términos de rol— toda oferta sale `weak` y no habría material.
+    const profilePath = join(directory, 'profile.json');
+    await writeFile(profilePath, `${JSON.stringify({ skills: ['typescript'], relevance: { roleTerms: ['developer'] } })}\n`);
     const eligible = opportunity();
     // Ocho días: un día fuera de PUBLICATION_WINDOW_DAYS, así el caso sigue probando "stale no genera brief".
     const blocked = opportunity({ title: 'Old role', source: 'test', externalId: 'old', publishedAt: '2026-09-08' });
-    const args = ['src/cli.ts', '--input', '-', '--state', statePath, '--now', now.toISOString(), '--candidate', candidatePath, '--candidacy-dir', candidacyDirectory];
+    const args = ['src/cli.ts', '--input', '-', '--state', statePath, '--profile', profilePath, '--now', now.toISOString(), '--candidate', candidatePath, '--candidacy-dir', candidacyDirectory];
     const first = spawnSync(process.execPath, args, { input: JSON.stringify([eligible, blocked]), encoding: 'utf8' });
     assert.equal(first.status, 0, first.stderr);
     assert.equal(JSON.parse(first.stdout).records.length, 2);
