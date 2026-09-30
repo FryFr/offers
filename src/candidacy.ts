@@ -1,6 +1,3 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import type { Opportunity } from './contracts.ts';
 import type { evaluate } from './evaluate.ts';
 
@@ -220,6 +217,17 @@ export function parseCandidateFacts(value: unknown): CandidateFacts {
 /** Tiers de relevancia que producen material de postulación. Los mismos que llegan al tablero. */
 export const CANDIDACY_TIERS: readonly string[] = ['strong', 'possible'];
 /**
+ * ¿Merece esta oferta material de postulación? Exportado para que quien arma el paquete pueda
+ * preguntarlo ANTES de buscar los hechos de su familia: sin eso, una oferta de pastelería reportaba
+ * "falta el CV de esa familia" cuando el motivo real era que el ranker ya la había descartado.
+ */
+export function candidacyGate(record: CandidacyRecord, tiers: readonly string[] = CANDIDACY_TIERS): boolean {
+  return record.evaluation.verification.status === 'verified'
+    && record.evaluation.screening.status !== 'discarded'
+    && record.evaluation.screening.employment.status !== 'ineligible'
+    && tiers.includes(record.evaluation.relevance.tier);
+}
+/**
  * Construye el brief solo para lo que de verdad vale una candidatura.
  *
  * El cruce de habilidades se hace contra el TEXTO de la oferta, reutilizando el
@@ -233,10 +241,7 @@ export const CANDIDACY_TIERS: readonly string[] = ['strong', 'possible'];
  * El gate añade el tier: sin él, esto genera una carpeta por cada registro verificado del histórico.
  */
 export function buildCandidacyBrief(record: CandidacyRecord, candidate: CandidateFacts, options: { tiers?: readonly string[] } = {}): CandidacyBrief | null {
-  if (record.evaluation.verification.status !== 'verified'
-    || record.evaluation.screening.status === 'discarded'
-    || record.evaluation.screening.employment.status === 'ineligible'
-    || !(options.tiers ?? CANDIDACY_TIERS).includes(record.evaluation.relevance.tier)) return null;
+  if (!candidacyGate(record, options.tiers)) return null;
   const relevance = record.evaluation.relevance;
   const candidateSkills = new Set(candidate.skills);
   // Lo hallado en el texto: núcleo y secundarias juntas, porque para una carta las dos son evidencia.
@@ -326,32 +331,4 @@ ${list(candidate.highlights, 'hechos o logros verificables')}
 - [ ] Verificar cada afirmación y cifra contra su fuente.
 - [ ] Aprobar el texto final antes de enviarlo.
 `;
-}
-
-export interface WrittenCandidacy { opportunityId: string; path: string; changed: boolean }
-
-/** Atomically write changed files only. Existing unrelated files are left untouched. */
-export async function writeCandidacyBriefs(directory: string, briefs: readonly CandidacyBrief[]): Promise<WrittenCandidacy[]> {
-  if (!briefs.length) return [];
-  await mkdir(directory, { recursive: true });
-  const results: WrittenCandidacy[] = [];
-  for (const brief of [...briefs].sort((a, b) => compareText(a.opportunityId, b.opportunityId))) {
-    if (!/^[a-f0-9]{64}$/.test(brief.opportunityId)) throw new Error('candidacy.opportunityId: SHA-256 inválido');
-    const path = join(directory, `${brief.opportunityId}.md`);
-    const contents = renderCandidacyMarkdown(brief);
-    let previous: string | undefined;
-    try { previous = await readFile(path, 'utf8'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (previous === contents) {
-      results.push({ opportunityId: brief.opportunityId, path, changed: false });
-      continue;
-    }
-    const temporary = join(directory, `.${brief.opportunityId}.${randomUUID()}.tmp`);
-    try {
-      await writeFile(temporary, contents, { flag: 'wx' });
-      await rename(temporary, path);
-    } finally { await rm(temporary, { force: true }); }
-    results.push({ opportunityId: brief.opportunityId, path, changed: true });
-  }
-  return results;
 }

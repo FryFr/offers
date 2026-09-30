@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { buildCandidacyBrief, parseCandidateFacts, renderCandidacyMarkdown, writeCandidacyBriefs } from '../src/candidacy.ts';
+import { buildCandidacyBrief, parseCandidateFacts, renderCandidacyMarkdown } from '../src/candidacy.ts';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { identity, ingest, report, type Store } from '../src/pipeline.ts';
 
@@ -111,22 +111,6 @@ test('Markdown es determinista, explícito y conserva placeholders y disclaimer'
   assert.match(markdown, /Built a documented service/);
 });
 
-test('escritura Markdown es atómica, estable e idempotente', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'offers-candidacy-write-'));
-  try {
-    const brief = buildCandidacyBrief(record(), facts)!;
-    const first = await writeCandidacyBriefs(directory, [brief]);
-    assert.equal(first[0]?.changed, true);
-    const path = first[0]!.path;
-    const before = await stat(path);
-    const contents = await readFile(path, 'utf8');
-    const second = await writeCandidacyBriefs(directory, [brief]);
-    assert.equal(second[0]?.changed, false);
-    assert.equal((await stat(path)).mtimeMs, before.mtimeMs);
-    assert.equal(await readFile(path, 'utf8'), contents);
-    assert.deepEqual((await readdir(directory)).sort(), [`${brief.opportunityId}.md`]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
 
 test('CLI opt-in genera solo briefs elegibles y no toca drafts', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'offers-candidacy-cli-'));
@@ -146,16 +130,25 @@ test('CLI opt-in genera solo briefs elegibles y no toca drafts', async () => {
     const first = spawnSync(process.execPath, args, { input: JSON.stringify([eligible, blocked]), encoding: 'utf8' });
     assert.equal(first.status, 0, first.stderr);
     assert.equal(JSON.parse(first.stdout).records.length, 2);
-    assert.deepEqual(await readdir(candidacyDirectory), [`${identity(eligible)}.md`]);
-    const path = join(candidacyDirectory, `${identity(eligible)}.md`);
+    // Un DIRECTORIO por oferta, nombrado con el SHA-256 que también es la External Key de Notion:
+    // desde una fila del tablero se llega a la carpeta copiando esa celda.
+    assert.deepEqual(await readdir(candidacyDirectory), [identity(eligible)], 'la stale no genera paquete');
+    const path = join(candidacyDirectory, identity(eligible), 'cv.md');
+    assert.deepEqual((await readdir(join(candidacyDirectory, identity(eligible)))).sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'review.json']);
     const contents = await readFile(path, 'utf8');
     const before = await stat(path);
     const second = spawnSync(process.execPath, args, { input: JSON.stringify([eligible, blocked]), encoding: 'utf8' });
     assert.equal(second.status, 0, second.stderr);
     assert.equal(await readFile(path, 'utf8'), contents);
-    assert.equal((await stat(path)).mtimeMs, before.mtimeMs);
+    assert.equal((await stat(path)).mtimeMs, before.mtimeMs, 'idempotente por bytes');
+    assert.deepEqual(JSON.parse(second.stdout).candidacy.written.map((w: { changed: string[] }) => w.changed), [[]], 'la segunda pasada no reescribe');
     const missingCandidate = spawnSync(process.execPath, ['src/cli.ts', '--input', '-', '--state', join(directory, 'unused.json'), '--candidacy-dir', candidacyDirectory], { input: '{}', encoding: 'utf8' });
     assert.equal(missingCandidate.status, 1);
+    assert.match(missingCandidate.stderr, /requiere --candidate o --candidate-by-family/);
+    // Y el patrón por familia exige el marcador: sin él, todas las familias leerían el mismo archivo.
+    const badPattern = spawnSync(process.execPath, ['src/cli.ts', '--input', '-', '--state', join(directory, 'unused2.json'), '--candidate-by-family', 'facts.json'], { input: '{}', encoding: 'utf8' });
+    assert.equal(badPattern.status, 1);
+    assert.match(badPattern.stderr, /\{family\}/);
     assert.match(missingCandidate.stderr, /requiere --candidate/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

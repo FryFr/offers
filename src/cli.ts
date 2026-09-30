@@ -8,7 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { parseProfile, parseOpportunity } from './contracts.ts';
 import { captureEvidence, createNodeCaptureFetch } from './evidence-capture.ts';
 import { ingest, parseStore, report, type Store } from './pipeline.ts';
-import { buildCandidacyBrief, parseCandidateFacts, writeCandidacyBriefs, CANDIDACY_TIERS } from './candidacy.ts';
+import { parseCandidateFacts, CANDIDACY_TIERS, type CandidateFacts } from './candidacy.ts';
+import { buildCandidacyPackage, writeCandidacyPackage, type SkippedCandidacy } from './candidacy-package.ts';
 import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
 
 const help = `Offers: entrada manual local; Notion opcional y desactivado por defecto.
@@ -64,7 +65,7 @@ async function main() {
       options.set(key, 'true'); continue;
     }
     const value = args[++i];
-    if (!['--input-format', '--input', '--profile', '--state', '--output', '--now', '--candidate', '--candidacy-dir', '--candidacy-tier', '--notion-config', '--notion-transport', '--tracking-state', '--tracking-import', '--tracking-record', '--tracking-cutoff'].includes(key) || !value || value.startsWith('--') || options.has(key)) throw new Error(`Argumento inválido\n${help}`);
+    if (!['--input-format', '--input', '--profile', '--state', '--output', '--now', '--candidate', '--candidate-by-family', '--candidacy-dir', '--candidacy-tier', '--notion-config', '--notion-transport', '--tracking-state', '--tracking-import', '--tracking-record', '--tracking-cutoff'].includes(key) || !value || value.startsWith('--') || options.has(key)) throw new Error(`Argumento inválido\n${help}`);
     options.set(key, value);
   }
   const inputFormat = options.get('--input-format') ?? 'opportunities';
@@ -74,7 +75,7 @@ async function main() {
   const trackingRecord = options.get('--tracking-record');
   const trackingMode = !!trackingState || !!trackingImport || !!trackingRecord || options.has('--tracking-report') || options.has('--tracking-cutoff');
   if (trackingMode) {
-    if (!trackingState || (trackingImport && trackingRecord) || ['--input-format', '--input', '--state', '--profile', '--candidate', '--candidacy-dir', '--candidacy-tier', '--notion-config', '--notion-transport', '--notion-sync', '--notion-dry-run', '--now', '--capture-evidence'].some(key => options.has(key))) throw new Error(`Modo de seguimiento inválido o mezclado con el flujo de ofertas\n${help}`);
+    if (!trackingState || (trackingImport && trackingRecord) || ['--input-format', '--input', '--state', '--profile', '--candidate', '--candidate-by-family', '--candidacy-dir', '--candidacy-tier', '--notion-config', '--notion-transport', '--notion-sync', '--notion-dry-run', '--now', '--capture-evidence'].some(key => options.has(key))) throw new Error(`Modo de seguimiento inválido o mezclado con el flujo de ofertas\n${help}`);
     if (!trackingImport && !trackingRecord && !options.has('--tracking-report')) throw new Error('--tracking-state requiere importar, registrar o reportar');
     const cutoffText = options.get('--tracking-cutoff') ?? new Date().toISOString();
     const cutoff = new Date(cutoffText);
@@ -108,13 +109,15 @@ async function main() {
   const outputPath = options.get('--output') ? resolve(options.get('--output')!) : undefined;
   const profilePath = options.get('--profile');
   const candidatePath = options.get('--candidate');
-  if (options.has('--candidacy-dir') && !candidatePath) throw new Error('--candidacy-dir requiere --candidate');
+  const byFamilyPattern = options.get('--candidate-by-family');
+  if (byFamilyPattern !== undefined && !byFamilyPattern.includes('{family}')) throw new Error('--candidate-by-family requiere {family} en la ruta');
+  if (options.has('--candidacy-dir') && !candidatePath && !byFamilyPattern) throw new Error('--candidacy-dir requiere --candidate o --candidate-by-family');
   // Escape para bajar el listón a mano. Solo admite `weak`: `off_target` lleva un bloqueo —rol
   // excluido, seniority por debajo del piso o geografía incompatible— y generar material para eso
   // sería redactar una candidatura que el propio ranker ya declaró inaplicable.
   const candidacyTier = options.get('--candidacy-tier');
   if (candidacyTier !== undefined && candidacyTier !== 'weak') throw new Error('--candidacy-tier solo admite weak');
-  const candidacyDirectory = candidatePath ? resolve(options.get('--candidacy-dir') ?? 'output/candidacy') : undefined;
+  const candidacyDirectory = candidatePath || byFamilyPattern ? resolve(options.get('--candidacy-dir') ?? 'output/candidacy') : undefined;
   if (candidacyDirectory) {
     const fromDrafts = relative(resolve('drafts'), candidacyDirectory);
     if (!fromDrafts || (!fromDrafts.startsWith('..') && !isAbsolute(fromDrafts))) throw new Error('--candidacy-dir no puede estar dentro de drafts');
@@ -127,7 +130,24 @@ async function main() {
   const now = dateArg ? new Date(dateArg) : new Date();
   if (!Number.isFinite(now.getTime()) || (dateArg && now.toISOString().replace('.000Z', 'Z') !== dateArg.replace('.000Z', 'Z'))) throw new Error('--now inválido');
   const profile = parseProfile(profilePath ? await readJson(profilePath) : {});
-  const candidate = candidatePath ? parseCandidateFacts(await readJson(candidatePath)) : undefined;
+  /**
+   * Hechos por FAMILIA de rol. `--candidate` sigue funcionando y se registra como `default`, que es
+   * la reserva SOLO para ofertas sin familia; nunca sustituye a una familia que falta.
+   *
+   * `--candidate-by-family data/candidate-facts-{family}.json` declara el patrón, y `{family}` se
+   * sustituye por cada clave de `relevance.roleTerms` del perfil. La que no tenga archivo no genera
+   * paquete y se reporta: mandarle el CV de otra familia sería peor que no mandar nada.
+   */
+  const factsByFamily: Record<string, CandidateFacts> = Object.create(null);
+  if (candidatePath) factsByFamily.default = parseCandidateFacts(await readJson(candidatePath));
+  if (byFamilyPattern) {
+    for (const family of Object.keys(profile.relevance.roleFamilies)) {
+      const path = resolve(byFamilyPattern.replace('{family}', family));
+      try { factsByFamily[family] = parseCandidateFacts(await readJson(path)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+  }
+  const candidate = factsByFamily.default;
   let input: unknown;
   if (inputPath === '-') {
     let text = '';
@@ -171,16 +191,22 @@ async function main() {
     if (notionSync.failed) process.exitCode = 1;
   }
   // Each file is atomic. They are not a shared transaction; rerunning repairs output.
-  if (candidate && candidacyDirectory) {
+  if (candidacyDirectory && Object.keys(factsByFamily).length) {
     // El tier entra al gate: sin él esto escribe una carpeta por CADA registro verificado del
-    // histórico —hoy serían cientos—, y `writeCandidacyBriefs` nunca borra huérfanos, así que el
-    // directorio solo crecería. El escape `--candidacy-tier weak` existe para bajar el listón a mano.
+    // histórico —hoy serían cientos—, y nada borra huérfanos, así que el directorio solo crecería.
+    // El escape `--candidacy-tier weak` existe para bajar el listón a mano.
     const tiers = candidacyTier ? [...CANDIDACY_TIERS, candidacyTier] : undefined;
-    const briefs = result.records.flatMap(record => {
-      const brief = buildCandidacyBrief(record, candidate, ...(tiers ? [{ tiers }] : []));
-      return brief ? [brief] : [];
-    });
-    await writeCandidacyBriefs(candidacyDirectory, briefs);
+    const written: { opportunityId: string; roleFamily: string; deliverable: boolean; changed: string[] }[] = [];
+    const skipped: SkippedCandidacy[] = [];
+    for (const record of result.records) {
+      const pack = buildCandidacyPackage(record, factsByFamily, profile, ...(tiers ? [{ tiers }] : []));
+      // `gate_blocked` es el caso normal —la mayoría del store no merece paquete— y reportarlo por
+      // registro ahogaría lo que sí hay que mirar. Solo se reporta lo que se quedó sin CV.
+      if ('reason' in pack) { if (pack.reason !== 'gate_blocked') skipped.push(pack); continue; }
+      const result_ = await writeCandidacyPackage(candidacyDirectory, pack);
+      written.push({ opportunityId: pack.opportunityId, roleFamily: pack.roleFamily, deliverable: pack.deliverable, changed: result_.changed });
+    }
+    output = { ...(output as Record<string, unknown>), candidacy: { written, skipped } };
   }
   if (outputPath) await atomicWrite(outputPath, output);
   await atomicWrite(statePath, next);

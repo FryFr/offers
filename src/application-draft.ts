@@ -52,15 +52,25 @@ export function selectAchievements(facts: CandidateFacts, matched: readonly stri
  * Las cartas escritas a mano llevaban esta lista fija, y por eso repetía cosas ya confirmadas y
  * omitía las que faltaban. Aquí sale de lo que el propio registro no pudo verificar, reusando las
  * mismas funciones que redactan el digest para que los dos no puedan contradecirse.
+ *
+ * El `item` va en inglés porque la carta está en inglés, y el `detail` —que es la redacción del
+ * digest, en español— se queda en el informe. Meter el detalle en el borrador mezclaba dos idiomas
+ * dentro del documento que se va a enviar, que es una forma fácil de mandar algo a medio traducir.
  */
-export function beforeSending(opportunity: Opportunity, profile: Profile): string[] {
-  const items: string[] = [];
-  if (opportunity.payDisclosure !== 'published') items.push(`confirm compensation (${money(opportunity, profile)})`);
-  if (opportunity.sponsorship?.status !== 'stated') items.push(`confirm work authorisation and sponsorship (${visa(opportunity) ?? 'the listing says nothing'})`);
-  if ((opportunity.remoteness ?? 'unknown') === 'unknown') items.push(`confirm location and working model (${place(opportunity)})`);
+export interface Confirmation {
+  /** Lo que hay que confirmar, en el idioma de la carta. Es lo único que se imprime en el borrador. */
+  item: string;
+  /** El motivo exacto tal como lo redacta el digest. Va al informe, no a la carta. */
+  detail?: string;
+}
+export function beforeSending(opportunity: Opportunity, profile: Profile): Confirmation[] {
+  const items: Confirmation[] = [];
+  if (opportunity.payDisclosure !== 'published') items.push({ item: 'confirm compensation', detail: money(opportunity, profile) });
+  if (opportunity.sponsorship?.status !== 'stated') items.push({ item: 'confirm work authorisation and sponsorship', ...(visa(opportunity) ? { detail: visa(opportunity)! } : {}) });
+  if ((opportunity.remoteness ?? 'unknown') === 'unknown') items.push({ item: 'confirm location and working model', detail: place(opportunity) });
   // Siempre, sin excepción: la evidencia de disponibilidad tiene un TTL de 24 h y una oferta puede
   // cerrarse entre el ciclo y el envío. Ninguna comprobación previa sustituye mirar la página.
-  items.push('confirm the listing is still open');
+  items.push({ item: 'confirm the listing is still open' });
   return items;
 }
 
@@ -99,7 +109,7 @@ I would welcome a conversation about the role.${facts.contact?.links?.length ? `
 Kind regards,
 ${facts.name}
 
-**Before sending:** ${beforeSending(opportunity, profile).join('; ')}.
+**Before sending:** ${beforeSending(opportunity, profile).map(c => c.item).join('; ')}.
 
 > Internal draft. No application or message has been sent.
 ${matched.length ? `>\n> Skills found in this posting: ${matched.join(', ')}.` : ''}

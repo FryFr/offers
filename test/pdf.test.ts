@@ -127,3 +127,23 @@ test('la carta compila y conserva las frases declaradas', { skip: !toolchain }, 
     await writeFile(join(dir, 'kept.txt'), source);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('ninguna palabra se parte al final de renglón, ni con texto largo', { skip: !toolchain }, async () => {
+  // Encontrado compilando una carta real: LaTeX guionó "minutes" y la capa de texto decía
+  // "90 min-\nutes". La palabra clave no aparecía, y el informe culpaba a la palabra clave cuando el
+  // problema era la maquetación. Un ATS que no deshifena tampoco la encontraría, así que se arregla
+  // la CAUSA —sin guionado— y además la comparación se hace inmune a artefactos de maquetado.
+  const dir = await mkdtemp(join(tmpdir(), 'offers-hyphen-'));
+  try {
+    const largo = 'Built an AI document-processing pipeline that reduced order processing from approximately 90 minutes to approximately 2 minutes across several distinguished international manufacturing organisations.';
+    const source = renderCoverLetterTex({ facts, company: 'Acme', paragraphs: [largo], bullets: [largo] });
+    const pdf = await compilePdf(source, dir, 'largo');
+    const report = await verifyAtsLayer(pdf, { keywords: [largo, 'minutes', 'document-processing'] });
+    assert.deepEqual(report.missing, [], 'la frase completa aparece pese a ocupar varios renglones');
+    assert.deepEqual(report.issues, []);
+    // Y la capa de texto no contiene ni un guión pegado a un salto de renglón.
+    const { spawnSync: run } = await import('node:child_process');
+    const layer = run('pdftotext', ['-layout', pdf, '-'], { encoding: 'utf8' }).stdout ?? '';
+    assert.equal(/-\s*\n/.test(layer.replace(/^- /gm, '')), false, 'ninguna palabra queda partida');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

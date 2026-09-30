@@ -59,6 +59,8 @@ test('la carta solo contiene frases declaradas: ninguna prosa nueva sobre la per
   // Y los huecos se marcan en vez de rellenarse.
   assert.match(letter, /\[TO COMPLETE: join into prose; do not add figures or claims that are not above\]/);
   assert.match(letter, /No application or message has been sent/);
+  // La carta entera está en inglés: ni el bloque de confirmaciones mete español.
+  assert.equal(/[áéíóúÁÉÍÓÚñ]/.test(letter.replace(/Bogotá/g, 'Bogota')), false, 'la carta no mezcla idiomas');
   assert.equal(letter, renderCoverLetterDraft({ facts, opportunity: job(), profile, matched, selected }), 'determinista');
 });
 
@@ -85,10 +87,12 @@ test('el bloque "Before sending" se calcula de los huecos del registro, no se es
   // lo que faltaba. Y reutiliza las mismas funciones que redactan el digest, para que los dos no
   // puedan contradecirse sobre la misma oferta.
   const sinNada = beforeSending(job(), profile);
-  assert.ok(sinNada.some(item => item.startsWith('confirm compensation')));
-  assert.ok(sinNada.some(item => item.startsWith('confirm work authorisation')));
-  assert.ok(sinNada.some(item => item.startsWith('confirm location')));
-  assert.ok(sinNada.includes('confirm the listing is still open'));
+  assert.deepEqual(sinNada.map(c => c.item), ['confirm compensation', 'confirm work authorisation and sponsorship',
+    'confirm location and working model', 'confirm the listing is still open']);
+  // El `item` va en INGLÉS, como la carta. El detalle —que es la redacción del digest, en español—
+  // se queda en el informe: mezclar idiomas dentro del documento que se envía es un accidente fácil.
+  assert.equal(/[áéíóúñ]/i.test(sinNada.map(c => c.item).join(' ')), false, 'ni una palabra en español en la carta');
+  assert.match(sinNada[0]!.detail!, /Salario no publicado/, 'el detalle sí conserva la redacción del digest');
 
   // Con los tres datos publicados, solo queda el que NINGUNA comprobación previa sustituye.
   const quote = 'We sponsor work visas for this role.';
@@ -98,7 +102,7 @@ test('el bloque "Before sending" se calcula de los huecos del registro, no se es
     remoteness: 'fully_remote',
     sponsorship: { status: 'stated', scope: 'unspecified', evidence: { kind: 'description_phrase', source: 'test', quote, observedAt: '2026-09-30T00:00:00Z' } },
   });
-  assert.deepEqual(beforeSending(completa, profile), ['confirm the listing is still open'],
+  assert.deepEqual(beforeSending(completa, profile).map(c => c.item), ['confirm the listing is still open'],
     'la evidencia de disponibilidad vence en 24 h: siempre hay que mirar la página');
 });
 

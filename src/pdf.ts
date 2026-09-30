@@ -50,6 +50,12 @@ const PREAMBLE = (font: string) => `\\documentclass[11pt,a4paper]{article}
 \\usepackage{titlesec}
 \\setmainfont{${font}}
 \\pagestyle{empty}
+% Sin guionado: LaTeX parte palabras al final de línea y un ATS lee "min-utes", no "minutes".
+% Medido el 2026-09-30 sobre una carta compilada: la capa de texto decía "90 min-\\nutes" y la
+% palabra clave no aparecía. Un renglón algo más suelto es un precio barato por una palabra entera.
+\\hyphenpenalty=10000
+\\exhyphenpenalty=10000
+\\sloppy
 \\setlist[itemize]{nosep,leftmargin=*,label={-}}
 \\titleformat{\\section}{\\large\\bfseries}{}{0pt}{}
 \\titlespacing{\\section}{0pt}{10pt}{4pt}
@@ -168,6 +174,14 @@ export interface AtsReport {
 const fold = (value: string) => value.normalize('NFC')
   .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"')
   .replace(/[\u2010-\u2015]/g, '-').replace(/\s+/g, ' ').trim().toLowerCase();
+/**
+ * Solo letras y dígitos, para buscar una palabra clave sin que la maquetación produzca un falso
+ * negativo. Un guionado al final de renglón deja "min-\nutes" en la capa de texto, y buscar
+ * "minutes" fallaba: el informe decía "falta esta palabra clave" cuando el problema era otro.
+ * Se acepta el riesgo de un falso positivo —"a rt" casando con "art"— porque un falso negativo
+ * esconde un defecto real detrás de uno tipográfico, que es mucho peor.
+ */
+const squash = (value: string) => fold(value).replace(/[^\p{L}\p{N}]/gu, '');
 
 /**
  * Comprueba lo que el PDF REALMENTE contiene, no lo que el `.tex` decía.
@@ -191,9 +205,10 @@ export async function verifyAtsLayer(pdfPath: string, options: { keywords?: read
   const issues: string[] = [];
   const minCharacters = options.minCharacters ?? 200;
   if (folded.length < minCharacters) issues.push(`text_layer_too_short:${folded.length}`);
+  const squashed = squash(raw);
   const keywords = [...new Set((options.keywords ?? []).map(k => fold(k)).filter(Boolean))];
-  const present = keywords.filter(keyword => folded.includes(keyword));
-  const missing = keywords.filter(keyword => !folded.includes(keyword));
+  const present = keywords.filter(keyword => squashed.includes(squash(keyword)));
+  const missing = keywords.filter(keyword => !squashed.includes(squash(keyword)));
   if (missing.length) issues.push(`keywords_missing:${missing.length}`);
   // SIN plegar: se busca el carácter problemático tal como quedó en el PDF.
   const unicodeDates = [...new Set(raw.match(/\d{4}\s?[\u2010-\u2015]\s?\d{2,4}/g) ?? [])];
