@@ -386,7 +386,11 @@ test('migración conserva ejemplos históricos unknown; reingesta guarda evidenc
   const original = verifiedOpportunity();
   const closed = { ...original, availability: { ...evidence.availability, outcome: 'closed' as const } };
   const state = ingest(ingest(ingest(empty(), original), closed), original);
-  assert.deepEqual(state.records[0]?.history, [original, closed]);
+  // La descripción NO se repite en el historial cuando no cambió: una entrada sin `description`
+  // significa "el mismo texto que la revisión siguiente". Todo lo demás se archiva literal.
+  const archived = ({ description: _unchanged, ...rest }: Opportunity) => rest;
+  assert.deepEqual(state.records[0]?.history, [archived(original), archived(closed)]);
+  assert.equal(state.records[0]!.opportunity.description, original.description, 'la revisión vigente sí la conserva');
   assert.deepEqual(parseStore(state), state);
   assert.deepEqual(ingest(state, original), state);
   // El historial conserva cada revisión tal como se observó, y sigue siendo evaluable a demanda.
@@ -409,7 +413,8 @@ test('una re-comprobación que solo mueve timestamps actualiza la oferta sin gen
   // Un cambio real sí se registra, y arrastra la versión vigente aunque venga de una re-comprobación.
   const closed = { ...rechecked, availability: { ...rechecked.availability, outcome: 'closed' as const } };
   const changed = ingest(state, closed);
-  assert.deepEqual(changed.records[0]?.history, [rechecked]);
+  const { description: _unchanged, ...archivada } = rechecked;
+  assert.deepEqual(changed.records[0]?.history, [archivada], 'se archiva sin repetir la descripción');
   assert.deepEqual(parseStore(changed), changed);
 });
 
@@ -431,4 +436,28 @@ test('la razón de ventana lleva el número y la cadena de 3 días ya no existe'
   assert.ok(reasons.includes(`publication_older_than_window_${PUBLICATION_WINDOW_DAYS}d`));
   const everything = JSON.stringify(report(ingest(empty(), stale), profile, now));
   assert.equal(everything.includes('publication_older_than_3_days'), false);
+});
+
+test('una revisión cuya cita de patrocinio vive en la descripción la conserva entera', () => {
+  // `parseOpportunity` exige que la cita de patrocinio aparezca LITERALMENTE en la descripción.
+  // Quitarla del historial para ahorrar bytes dejaría el checkpoint imposible de volver a cargar,
+  // así que esas revisiones son la excepción explícita y pagan el espacio.
+  const quote = 'We sponsor visas for this role.';
+  const description = `Build TypeScript services. ${quote} Apply today.`;
+  const conPatrocinio = verifiedOpportunity({ description,
+    sponsorship: { status: 'stated', evidence: { kind: 'description_phrase', source: 'test', quote, observedAt: now.toISOString() } } });
+  // Cambia la ubicación, no la descripción: el caso que dispara el ahorro en todos los demás.
+  const movida = { ...conPatrocinio, location: 'Remote' };
+  const state = ingest(ingest(empty(), conPatrocinio), movida);
+  assert.equal(state.records[0]?.history?.length, 1);
+  assert.equal(state.records[0]!.history![0]!.description, description, 'la descripción se conserva');
+  // La prueba que de verdad importa: el store vuelve a cargar. Sin la excepción, esto lanzaría.
+  assert.deepEqual(parseStore(state), state);
+
+  // Y el caso normal, sin patrocinio en la descripción, sí ahorra.
+  const normal = verifiedOpportunity({ description });
+  const normalMovida = { ...normal, location: 'Remote' };
+  const ahorrada = ingest(ingest(empty(), normal), normalMovida);
+  assert.equal('description' in ahorrada.records[0]!.history![0]!, false, 'sin evidencia que sostener, se ahorra');
+  assert.deepEqual(parseStore(ahorrada), ahorrada);
 });

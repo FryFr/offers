@@ -54,6 +54,27 @@ const withoutRecheckStamps = (o: Opportunity) => JSON.stringify({
   ...(o.availability ? { availability: { ...o.availability, checkedAt: '' } } : {}),
   ...(o.publicationEvidence ? { publicationEvidence: { ...o.publicationEvidence, observedAt: '' } } : {}),
 });
+/**
+ * La revisión que se ARCHIVA, sin la descripción cuando esa descripción no cambió.
+ *
+ * Medido el 2026-09-30: el grueso del historial eran copias byte a byte del mismo texto, porque la
+ * revisión nace de un cambio de `location`, de compensación o de disponibilidad y la descripción
+ * viaja de acompañante. Una entrada de historial **sin** `description` significa "el mismo texto
+ * que la revisión siguiente", y quien quiera reconstruirla avanza hasta la primera que sí la trae
+ * —como tope, la oferta vigente—. `identity()` no mira la descripción y el campo es opcional en el
+ * contrato, así que `parseStore` sigue validando exactamente igual.
+ *
+ * La excepción NO es opcional: si el patrocinio se apoya en una frase de la descripción,
+ * `parseOpportunity` exige que la cita aparezca literalmente en ella ([contracts.ts:256]). Quitar
+ * el texto dejaría el checkpoint imposible de volver a cargar. Esas revisiones conservan su
+ * descripción entera, y el ahorro se pierde justo donde hay evidencia que sostener.
+ */
+const archiveRevision = (previous: Opportunity, next: Opportunity): Opportunity => {
+  if (previous.description === undefined || previous.description !== next.description) return previous;
+  if (previous.sponsorship?.evidence.kind === 'description_phrase') return previous;
+  const { description: _unchanged, ...rest } = previous;
+  return rest;
+};
 export function ingest(store: Store, input: unknown): Store {
   const opportunities = (Array.isArray(input) ? input : [input]).map(parseOpportunity);
   const records = new Map(store.records.map(r => [r.id, r]));
@@ -64,7 +85,7 @@ export function ingest(store: Store, input: unknown): Store {
     // Una re-comprobación que solo mueve timestamps actualiza la oferta pero no genera revisión:
     // el TTL necesita el `checkedAt` fresco, el historial no gana nada guardando el anterior.
     const recheckOnly = previous !== undefined && withoutRecheckStamps(previous.opportunity) === withoutRecheckStamps(opportunity);
-    const history = previous && !recheckOnly ? [...(previous.history ?? []), previous.opportunity] : previous?.history ?? [];
+    const history = previous && !recheckOnly ? [...(previous.history ?? []), archiveRevision(previous.opportunity, opportunity)] : previous?.history ?? [];
     // El historial se acota por registro: sin tope, un cambio real de contrato reescribe miles de
     // registros a la vez y el store crece sin techo. Se conservan las revisiones más recientes.
     records.set(id, { id, opportunity, ...(history.length ? { history: history.slice(-MAX_HISTORY) } : {}) });
