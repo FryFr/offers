@@ -4,7 +4,8 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseCandidateFacts, type CandidateFacts } from '../src/candidacy.ts';
-import { buildCandidacyPackage, writeCandidacyPackage, type CandidacyPackage } from '../src/candidacy-package.ts';
+import { buildCandidacyPackage, compileCandidacyPdfs, writeCandidacyPackage, type CandidacyPackage } from '../src/candidacy-package.ts';
+import { spawnSync } from 'node:child_process';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { ingest, report, type Store } from '../src/pipeline.ts';
 
@@ -83,5 +84,24 @@ test('la escritura es atómica, idempotente por bytes y no deja temporales', asy
     assert.match(first.path, /[a-f0-9]{64}$/);
     await assert.rejects(writeCandidacyPackage(directory, { ...pack, opportunityId: '../fuera' }), /SHA-256 inválido/);
     await assert.rejects(writeCandidacyPackage(directory, { ...pack, files: [{ name: '../x.md', contents: 'x' }] }), /nombre de archivo inválido/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+const toolchain = spawnSync('lualatex', ['--version']).error === undefined && spawnSync('pdftotext', ['-v']).error === undefined;
+test('los PDF se compilan junto al paquete y se verifican contra ESTA oferta', { skip: !toolchain }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'offers-pack-pdf-'));
+  try {
+    const pack = buildCandidacyPackage(record(), byFamily, profile) as CandidacyPackage;
+    // Las palabras clave son las que `relevance()` halló en el texto de la oferta, no una lista fija:
+    // solo así el informe dice algo sobre si el PDF comunica lo que ESTA vacante pide.
+    assert.deepEqual(pack.keywords.sort(), ['llm', 'n8n']);
+    await writeCandidacyPackage(directory, pack);
+    const compiled = await compileCandidacyPdfs(directory, pack, byFamily.ai_automation, 'Acme');
+    assert.deepEqual(compiled.cv.issues, [], 'el CV pasa la compuerta');
+    assert.deepEqual(compiled.cv.missing, [], 'las palabras de la oferta están en el PDF');
+    assert.deepEqual(compiled.coverLetter.missing, [], 'cada viñeta declarada llega al PDF de la carta');
+    assert.deepEqual(compiled.cv.nonAscii, [], 'la plantilla no aporta tipografía fuera de ASCII');
+    assert.equal(compiled.ok, true);
+    assert.deepEqual((await readdir(join(directory, pack.opportunityId))).filter(f => f.endsWith('.pdf')).sort(), ['cover-letter.pdf', 'cv.pdf']);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

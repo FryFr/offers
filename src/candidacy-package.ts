@@ -16,11 +16,14 @@ import { buildCandidacyBrief, candidacyGate, renderCandidacyMarkdown, type Candi
 import { beforeSending, renderCoverLetterDraft, renderTailoredCv, selectAchievements } from './application-draft.ts';
 import { deliverable, reviewCandidacy, type Finding } from './candidacy-review.ts';
 import type { Profile } from './contracts.ts';
+import { compilePdf, renderCoverLetterTex, renderCvTex, verifyAtsLayer, type AtsReport, type Engine } from './pdf.ts';
 
 export interface PackageFile { name: string; contents: string }
 export interface CandidacyPackage {
   opportunityId: string;
   roleFamily: string;
+  /** Lo que `relevance()` halló en el texto de ESTA oferta. Con esto se verifica el PDF. */
+  keywords: string[];
   files: PackageFile[];
   findings: Finding[];
   deliverable: boolean;
@@ -46,7 +49,7 @@ export function buildCandidacyPackage(record: CandidacyRecord, factsByFamily: Re
   const letter = renderCoverLetterDraft(inputs);
   const cv = renderTailoredCv(inputs);
   const findings = reviewCandidacy({ facts, opportunity: record.opportunity, letter, cv, roleFamily: family, matched });
-  return { opportunityId: record.id, roleFamily: family, deliverable: deliverable(findings), findings,
+  return { opportunityId: record.id, roleFamily: family, keywords: [...matched], deliverable: deliverable(findings), findings,
     files: [
       { name: 'brief.md', contents: renderCandidacyMarkdown(brief) },
       { name: 'cover-letter.md', contents: letter },
@@ -87,4 +90,31 @@ export async function writeCandidacyPackage(directory: string, pack: CandidacyPa
     changed.push(file.name);
   }
   return { path, changed };
+}
+
+export interface CompiledPackage { cv: AtsReport; coverLetter: AtsReport; ok: boolean }
+/**
+ * Compila el CV y la carta a PDF junto al paquete, y pasa la compuerta ATS.
+ *
+ * Es OPT-IN porque compilar cuesta un par de segundos por oferta y quince ofertas son medio minuto.
+ * El Markdown se genera siempre; el PDF, cuando se va a enviar algo.
+ *
+ * Las palabras clave con las que se verifica son las de ESTA oferta: lo que `relevance()` halló en su
+ * texto. Comprobar contra una lista fija no diría nada sobre si el PDF comunica lo que esta vacante
+ * pide. Y las viñetas de la carta se verifican literales, que es la misma garantía del Markdown
+ * llevada hasta el archivo que se adjunta.
+ */
+export async function compileCandidacyPdfs(directory: string, pack: CandidacyPackage, facts: CandidateFacts, company: string, options: { engine?: Engine } = {}): Promise<CompiledPackage> {
+  const path = join(directory, pack.opportunityId);
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const letter = pack.files.find(file => file.name === 'cover-letter.md')!.contents;
+  const paragraphs = letter.split('\n').filter(line => line && !line.startsWith('#') && !line.startsWith('-') && !line.startsWith('>') && !line.startsWith('**'));
+  const bullets = letter.split('\n').filter(line => line.startsWith('- ')).map(line => line.slice(2));
+  // El CV se verifica contra lo que la OFERTA pide; la carta, contra sus propias viñetas, que es la
+  // garantía del Markdown llevada hasta el archivo que se adjunta.
+  const cvPath = await compilePdf(renderCvTex(facts), path, 'cv', options);
+  const cv = await verifyAtsLayer(cvPath, { keywords: pack.keywords, expectedPages: 1 });
+  const coverPath = await compilePdf(renderCoverLetterTex({ facts, company, paragraphs, bullets }), path, 'cover-letter', options);
+  const coverLetter = await verifyAtsLayer(coverPath, { keywords: bullets, expectedPages: 1 });
+  return { cv, coverLetter, ok: cv.ok && coverLetter.ok };
 }

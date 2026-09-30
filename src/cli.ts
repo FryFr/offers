@@ -9,7 +9,7 @@ import { parseProfile, parseOpportunity } from './contracts.ts';
 import { captureEvidence, createNodeCaptureFetch } from './evidence-capture.ts';
 import { ingest, parseStore, report, type Store } from './pipeline.ts';
 import { parseCandidateFacts, CANDIDACY_TIERS, type CandidateFacts } from './candidacy.ts';
-import { buildCandidacyPackage, writeCandidacyPackage, type SkippedCandidacy } from './candidacy-package.ts';
+import { buildCandidacyPackage, compileCandidacyPdfs, writeCandidacyPackage, type SkippedCandidacy } from './candidacy-package.ts';
 import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
 
 const help = `Offers: entrada manual local; Notion opcional y desactivado por defecto.
@@ -60,8 +60,8 @@ async function main() {
   const options = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
     const key = args[i]!;
-    if (['--notion-dry-run', '--notion-sync', '--tracking-report', '--capture-evidence'].includes(key)) {
-      if (options.has(key)) throw new Error('Modo Notion duplicado');
+    if (['--notion-dry-run', '--notion-sync', '--tracking-report', '--capture-evidence', '--candidacy-pdf'].includes(key)) {
+      if (options.has(key)) throw new Error('Bandera repetida');
       options.set(key, 'true'); continue;
     }
     const value = args[++i];
@@ -75,7 +75,7 @@ async function main() {
   const trackingRecord = options.get('--tracking-record');
   const trackingMode = !!trackingState || !!trackingImport || !!trackingRecord || options.has('--tracking-report') || options.has('--tracking-cutoff');
   if (trackingMode) {
-    if (!trackingState || (trackingImport && trackingRecord) || ['--input-format', '--input', '--state', '--profile', '--candidate', '--candidate-by-family', '--candidacy-dir', '--candidacy-tier', '--notion-config', '--notion-transport', '--notion-sync', '--notion-dry-run', '--now', '--capture-evidence'].some(key => options.has(key))) throw new Error(`Modo de seguimiento inválido o mezclado con el flujo de ofertas\n${help}`);
+    if (!trackingState || (trackingImport && trackingRecord) || ['--input-format', '--input', '--state', '--profile', '--candidate', '--candidate-by-family', '--candidacy-dir', '--candidacy-tier', '--candidacy-pdf', '--notion-config', '--notion-transport', '--notion-sync', '--notion-dry-run', '--now', '--capture-evidence'].some(key => options.has(key))) throw new Error(`Modo de seguimiento inválido o mezclado con el flujo de ofertas\n${help}`);
     if (!trackingImport && !trackingRecord && !options.has('--tracking-report')) throw new Error('--tracking-state requiere importar, registrar o reportar');
     const cutoffText = options.get('--tracking-cutoff') ?? new Date().toISOString();
     const cutoff = new Date(cutoffText);
@@ -115,6 +115,9 @@ async function main() {
   // Escape para bajar el listón a mano. Solo admite `weak`: `off_target` lleva un bloqueo —rol
   // excluido, seniority por debajo del piso o geografía incompatible— y generar material para eso
   // sería redactar una candidatura que el propio ranker ya declaró inaplicable.
+  // Compilar cuesta un par de segundos por oferta, así que el PDF es opt-in: el Markdown se genera
+  // siempre, el PDF cuando se va a enviar algo.
+  const wantsPdf = options.has('--candidacy-pdf');
   const candidacyTier = options.get('--candidacy-tier');
   if (candidacyTier !== undefined && candidacyTier !== 'weak') throw new Error('--candidacy-tier solo admite weak');
   const candidacyDirectory = candidatePath || byFamilyPattern ? resolve(options.get('--candidacy-dir') ?? 'output/candidacy') : undefined;
@@ -196,15 +199,32 @@ async function main() {
     // histórico —hoy serían cientos—, y nada borra huérfanos, así que el directorio solo crecería.
     // El escape `--candidacy-tier weak` existe para bajar el listón a mano.
     const tiers = candidacyTier ? [...CANDIDACY_TIERS, candidacyTier] : undefined;
-    const written: { opportunityId: string; roleFamily: string; deliverable: boolean; changed: string[] }[] = [];
+    const written: { opportunityId: string; roleFamily: string; deliverable: boolean; changed: string[]; ats?: string[] }[] = [];
     const skipped: SkippedCandidacy[] = [];
     for (const record of result.records) {
       const pack = buildCandidacyPackage(record, factsByFamily, profile, ...(tiers ? [{ tiers }] : []));
       // `gate_blocked` es el caso normal —la mayoría del store no merece paquete— y reportarlo por
       // registro ahogaría lo que sí hay que mirar. Solo se reporta lo que se quedó sin CV.
       if ('reason' in pack) { if (pack.reason !== 'gate_blocked') skipped.push(pack); continue; }
-      const result_ = await writeCandidacyPackage(candidacyDirectory, pack);
-      written.push({ opportunityId: pack.opportunityId, roleFamily: pack.roleFamily, deliverable: pack.deliverable, changed: result_.changed });
+      const written_ = await writeCandidacyPackage(candidacyDirectory, pack);
+      // Si la compilación falla, NO se pierde el paquete: el Markdown ya está escrito y el motivo se
+      // reporta. Un LaTeX ausente no puede costar la ficha ni la carta.
+      let ats: string[] | undefined;
+      if (wantsPdf) {
+        try {
+          const compiled = await compileCandidacyPdfs(candidacyDirectory, pack, factsByFamily[pack.roleFamily] ?? factsByFamily.default!, record.opportunity.company);
+          // Se nombran las palabras que FALTAN, no solo cuántas: "keywords_missing:2" no dice qué
+          // hacer, y "el CV no menciona python ni docker, que esta oferta pide" sí.
+          ats = [
+            ...compiled.cv.issues.filter(i => !i.startsWith('keywords_missing')).map(i => `cv:${i}`),
+            ...(compiled.cv.missing.length ? [`cv:missing:${compiled.cv.missing.join(',')}`] : []),
+            ...compiled.coverLetter.issues.filter(i => !i.startsWith('keywords_missing')).map(i => `cover:${i}`),
+            ...(compiled.coverLetter.missing.length ? [`cover:missing:${compiled.coverLetter.missing.length}`] : []),
+          ];
+        } catch (error) { ats = [`compile_failed:${error instanceof Error ? error.message : 'unknown'}`]; }
+      }
+      written.push({ opportunityId: pack.opportunityId, roleFamily: pack.roleFamily, deliverable: pack.deliverable,
+        changed: written_.changed, ...(ats ? { ats } : {}) });
     }
     output = { ...(output as Record<string, unknown>), candidacy: { written, skipped } };
   }
