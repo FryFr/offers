@@ -74,11 +74,12 @@ No inbound HTTP endpoint, arbitrary command webhook or durable remote queue is i
 
 ## Read-only tools for deciding
 
-Two subcommands exist to make a decision measurable before it is taken. Neither writes anything.
+Three subcommands exist to make a decision measurable before it is taken. None writes anything.
 
 ```sh
 bin/offers --probe-source ashby supabase
 bin/offers --digest-preview [--now TIMESTAMP] [--profile PATH]
+bin/offers --upskill [--json]
 ```
 
 `--probe-source` reads one board and reports whether it exists, how many offers it lists, how many carry
@@ -95,6 +96,19 @@ over the same checkpoint with the same `--now` and diff. It deliberately does no
 only reads and every write in this project is atomic; taking the lock would make previewing fail while the cycle
 runs, which is when you want to look.
 
+`--upskill` answers which skill to study next with the pool you already have. It counts, over the
+**verified and relevant** offers only -- not the whole market, because the question is what the offers
+that suit you ask for -- how many name each term of an explicit vocabulary, how many of those are
+`strong`, and whether the profile declares it. The vocabulary is a list in `src/upskill.ts`, not a free
+extraction: counting n-grams of a job description puts "team", "experience" and "customer" in the top
+and a report like that never gets opened twice. Matching uses the ranker's own aliases, so a term the
+profile declares under another name is reported as declared and never recommended as a gap.
+
+It also prints the other direction: core skills the pool never asks for. That is not decoration -- the
+skill score divides by the size of the core, so a core skill nobody asks for lowers the score of EVERY
+offer equally. Those are the candidates to move to `secondarySkills`, where they add when they appear
+and never subtract.
+
 ## Application material
 
 ```sh
@@ -103,8 +117,8 @@ npm start -- --input - --profile examples/profile.json --state data/offers.json 
   --candidacy-dir output/candidacy --candidacy-pdf
 ```
 
-Produces `output/candidacy/<id>/` with `brief.md`, `cover-letter.md`, `cv.md`, `review.json` and,
-with `--candidacy-pdf`, `cv.pdf` and `cover-letter.pdf`. The `<id>` is the same SHA-256 that is the
+Produces `output/candidacy/<id>/` with `brief.md`, `cover-letter.md`, `cv.md`, `interview.md`,
+`review.json` and, with `--candidacy-pdf`, `cv.pdf` and `cover-letter.pdf`. The `<id>` is the same SHA-256 that is the
 record id and Notion's `External Key`, so a board row leads to the folder by copying that cell.
 
 Only offers the board would receive get material: verified, not discarded, employment not
@@ -121,6 +135,13 @@ tailored CV reorders skill groups and the achievements inside each role, and nev
 `experience` -- the chronology is a fact. `src/candidacy-review.ts` blocks delivery when a line is
 not backed by the facts, a skill is not in a declared group, a role disappeared, or the chronology is
 out of order.
+
+`interview.md` is written beside the material, not when the interview is scheduled, so it cannot
+diverge from the letter and CV that were actually sent. It is the one deterministic part of interview
+prep: what the package claims about you, verbatim, with where each line came from, which of this
+posting's skills your material backs and which it does not, and what the posting never said and is
+worth asking. STAR answers, company research and mock interviews are deliberately absent -- they need
+a model and they need back and forth, which is a conversation, not a file in a pipeline.
 
 `--candidacy-pdf` compiles with `lualatex` and verifies the result with `pdftotext`, both system
 binaries like `himalaya`. The template is one column, no icons, no tables, and uses only packages a
