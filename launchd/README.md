@@ -14,6 +14,17 @@ macOS vive en `~/Library/LaunchAgents`, que no se versiona ni se respalda.
 | `com.juansilva.offers-sponsors` | `--refresh-sponsors` | lunes 05:00 | disponible |
 | `com.juansilva.offers-sync` | `--sync` | cada hora al :20 | disponible |
 | `com.juansilva.offers-status` | `--pull-status` | diaria 06:40 | disponible |
+| `com.juansilva.offers-vacuum` | `--vacuum --apply` | cada 6 h (01:30, 07:30, 13:30, 19:30) | disponible |
+
+**La purga va cuatro veces al día, y el motivo es el lock.** Toma el del checkpoint, así que si el
+ciclo horario está corriendo sale con 3 y no hace nada. Con una sola oportunidad diaria eso
+significaría saltarse el día entero, y el checkpoint crece ~145 MB diarios desde que `freehire` aporta
+~1.900 ofertas por ciclo: dos días perdidos se comen el margen hasta el techo de 512 MB. La purga es
+idempotente y tarda ~37 s, así que la segunda pasada del día no encuentra nada que borrar y cuatro
+intentos no cuestan nada.
+
+Se construyó sin agendar y eso bastó para que el checkpoint volviera de 215,8 MB a 360,8 MB en un
+día. Una capacidad que no está agendada no existe.
 
 **El agente de sync es el único que se invoca por `bin/offers`** y no por `node` directo. No es una
 inconsistencia: es el único comando que necesita `NOTION_API_KEY`, y launchd no arranca un shell de

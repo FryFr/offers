@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Purga del checkpoint (`--vacuum --apply`), cada seis horas.
+     Plantilla versionada: el original vive en ~/Library/LaunchAgents, que no se versiona.
+
+     POR QUÉ EXISTE: la purga se construyó y no se agendó, y el checkpoint volvió a crecer solo.
+     Medido: 215,8 MB el 2026-09-30 tras purgar a mano, 360,8 MB el 2026-10-01. Son +145 MB al día
+     —no los ~28 que crecía antes de añadir freehire, que aporta ~1.900 ofertas por ciclo— y el techo
+     duro son 512 MB, porque `readFile(path,'utf8')` no puede crear un string mayor. Sin este agente,
+     el margen se consume en un día y el ciclo horario empieza a fallar al leer su propio checkpoint.
+
+     Qué borra: registros cuyo `validUntil` pasó hace más de STORE_GRACE_DAYS. Son `stale`
+     irreversibles —la ventana de publicación no se cura— así que no pueden volver a un corte. Un
+     registro SIN `availability` no tiene `validUntil` y se conserva: sin señal, borrar a ciegas es
+     peor. Poda además `provenance` a las URLs de los registros vivos y compacta el historial.
+
+     Lo irrecuperable, dicho de frente: revisiones históricas de ofertas que ninguna fuente lista ya,
+     y el `observedAt` de la primera observación en `provenance`.
+
+     CUATRO VECES AL DÍA, no una, y el motivo es el lock. La purga toma el lock del checkpoint, así
+     que si el ciclo horario está corriendo sale con 3 y no hace nada. Con una sola oportunidad diaria
+     eso significa saltarse el día entero, y a +145 MB diarios dos días seguidos se comen el margen.
+     La purga es IDEMPOTENTE y tarda ~37 s: la segunda pasada del día no encuentra nada que borrar, así
+     que cuatro intentos no cuestan nada y hacen improbable fallar los cuatro.
+
+     01:30 queda antes del corte diario (06:00), así que el corte lee un checkpoint ya purgado — y lo
+     purgado era `stale`, que nunca estuvo en el corte. Los :30 esquivan el sync, que corre al :20.
+
+     No necesita secretos: no toca la red. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.juansilva.offers-vacuum</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/juansilva/.local/bin/node</string>
+    <string>--max-old-space-size=8192</string>
+    <string>/Users/juansilva/Documents/offers/src/source-cli.ts</string>
+    <string>--vacuum</string>
+    <string>--apply</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <key>RunAtLoad</key>          <false/>
+  <key>StandardOutPath</key>    <string>/Users/juansilva/Documents/offers/data/logs/vacuum.out.log</string>
+  <key>StandardErrorPath</key>  <string>/Users/juansilva/Documents/offers/data/logs/vacuum.err.log</string>
+  <key>ProcessType</key>        <string>Background</string>
+  <key>LowPriorityIO</key>      <true/>
+  <key>Nice</key>               <integer>5</integer>
+</dict>
+</plist>
