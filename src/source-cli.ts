@@ -277,7 +277,7 @@ export type HealthReason = 'no_checkpoint' | 'checkpoint_degraded';
 /** Proporción de fuentes habilitadas que deben estar sanas para considerar utilizable el ciclo. */
 export const HEALTH_QUORUM = 0.8;
 /** Lo único que `sourceHealth` necesita del ciclo, y nada más. Unos pocos KB. */
-interface HealthSnapshot { generatedAt?: string; health?: { status?: string; sourceId?: string }[]; mode?: string; confirmed?: boolean; counts?: unknown }
+interface HealthSnapshot { generatedAt?: string; health?: { status?: string; sourceId?: string; fetched?: number }[]; mode?: string; confirmed?: boolean; counts?: unknown }
 /**
  * Juzga el último ciclo leyendo un archivo de unos KB, no el checkpoint.
  *
@@ -303,11 +303,26 @@ export async function sourceHealth(root = repositoryRoot, now = new Date()) {
    */
   const entries = fresh ? checkpoint.health! : [];
   const enabled = entries.filter(s => s.status !== 'disabled');
-  const working = enabled.filter(s => ['ok', 'not_due'].includes(s.status ?? ''));
+  /**
+   * Una fuente CONTRIBUYÓ si entregó filas, aunque su estado sea `partial`.
+   *
+   * El quórum juzga si el CICLO sirve, no si cada proveedor se portó perfecto. `freehire` entrega
+   * 1.899 de sus ~1.943 ofertas y entonces el proveedor deja colgada la última página: se reporta
+   * `partial` con `paged_request_timeout`, que es honesto, pero contarlo como degradado lo deja en la
+   * lista de problemas TODOS los días. Un aviso permanente sobre algo que funciona es exactamente lo
+   * que entrena a ignorar el monitor, y este proyecto ya eligió quórum sobre unanimidad por ese mismo
+   * motivo.
+   *
+   * Un `partial` SIN filas sí cuenta como degradado: ahí la parada elegante no salvó nada.
+   */
+  const contributed = (s: { status?: string; fetched?: number }) => ['ok', 'not_due'].includes(s.status ?? '') || (s.status === 'partial' && (s.fetched ?? 0) > 0);
+  const working = enabled.filter(contributed);
   const ratio = enabled.length ? working.length / enabled.length : 0;
   const healthy = fresh && enabled.length > 0 && ratio >= HEALTH_QUORUM;
   const quorum = { working: working.length, enabled: enabled.length, required: HEALTH_QUORUM,
-    degraded: enabled.filter(s => !['ok', 'not_due'].includes(s.status ?? '')).map(s => s.sourceId ?? '?') };
+    degraded: enabled.filter(s => !contributed(s)).map(s => s.sourceId ?? '?'),
+    // Lo que entregó pese a no terminar se nombra aparte: sigue visible sin disfrazarse de avería.
+    partial: enabled.filter(s => s.status === 'partial' && (s.fetched ?? 0) > 0).map(s => `${s.sourceId ?? '?'}:${s.fetched}`) };
   return { healthy, ...(healthy ? {} : { reason: 'checkpoint_degraded' as HealthReason }), mode: 'dry-run', confirmed: false, generatedAt: checkpoint.generatedAt, counts: checkpoint.counts, quorum };
 }
 /** Reads the existing checkpoint store/profile and the existing writer only; never recollects sources or revalidates cadence. */

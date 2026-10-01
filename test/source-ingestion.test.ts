@@ -755,3 +755,34 @@ test('el sync manda lo relevante, conserva lo ya entregado y todo con --all', as
     await assert.rejects(runNotionSync({ root, now, dependencies: { transport } }), /existe \.lock/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('una fuente que entregó filas cuenta como sana, aunque su paginación no terminara', async () => {
+  // El quórum juzga si el CICLO sirve, no si cada proveedor se portó perfecto. freehire entrega 1.899
+  // de ~1.943 ofertas y el proveedor deja colgada la última página: `partial` con
+  // `paged_request_timeout`. Contarlo como degradado lo dejaba en la lista de problemas TODOS los
+  // días, y un aviso permanente sobre algo que funciona entrena a ignorar el monitor.
+  const root = await mkdtemp(join(tmpdir(), 'offers-quorum-'));
+  try {
+    await mkdir(join(root, 'data'), { recursive: true, mode: 0o700 });
+    const fresh = new Date().toISOString();
+    const snapshot = (health: { sourceId: string; status: string; fetched: number; reason?: string }[]) =>
+      writeFile(join(root, 'data/source-health.json'), JSON.stringify({ version: 1, generatedAt: fresh, mode: 'dry-run', confirmed: false, health, counts: {} }));
+
+    await snapshot([
+      { sourceId: 'freehire', status: 'partial', fetched: 1899, reason: 'paged_request_timeout' },
+      { sourceId: 'himalayas', status: 'ok', fetched: 120 },
+      { sourceId: 'remotive', status: 'failed', fetched: 0, reason: 'request_timeout' },
+    ]);
+    const health = await sourceHealth(root, new Date(fresh));
+    assert.equal(health.quorum!.working, 2, 'el partial productivo cuenta');
+    assert.deepEqual(health.quorum!.degraded, ['remotive'], 'solo lo que no entregó nada');
+    // Y sigue VISIBLE, nombrado aparte, sin disfrazarse de avería.
+    assert.deepEqual(health.quorum!.partial, ['freehire:1899']);
+
+    // Un `partial` SIN filas sí es degradado: ahí la parada elegante no salvó nada.
+    await snapshot([{ sourceId: 'freehire', status: 'partial', fetched: 0, reason: 'paged_request_timeout' }]);
+    const vacio = await sourceHealth(root, new Date(fresh));
+    assert.deepEqual(vacio.quorum!.degraded, ['freehire']);
+    assert.deepEqual(vacio.quorum!.partial, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
