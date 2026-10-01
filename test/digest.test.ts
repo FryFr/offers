@@ -167,3 +167,36 @@ test('--digest-preview imprime el corte y no deja rastro en el ledger ni en las 
     assert.equal(await sourcesMain(['--digest-preview', '--now'], root), 2);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('el corte diario corre aunque el ciclo tenga su lock, y se serializa con el ledger', async () => {
+  // Medido el 2026-10-01: NO hubo digest ese día. `runDigest` sostenía `data/automation`, el mismo
+  // lock que toma `runSources`, así que el corte de las 06:00 murió con `source_lock_busy` por un
+  // ciclo que iba a terminar solo. Perder el corte diario por eso es perder lo que el proyecto
+  // entrega. El digest LEE el checkpoint y las escrituras del proyecto son atómicas.
+  const root = await mkdtemp(join(tmpdir(), 'offers-digest-lock-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'), { recursive: true, mode: 0o700 });
+    await writeFile(join(root, 'examples/profile.json'), JSON.stringify({ skills: ['typescript'], relevance: { roleTerms: ['software engineer'], dailyTarget: 2 } }));
+    const fresh = new Date().toISOString();
+    const today = fresh.slice(0, 10);
+    const store = ingest({ version: 1, records: [] }, Array.from({ length: 2 }, (_, i) => {
+      const url = `https://example.com/job-${i}`;
+      return parseOpportunity({ title: 'Senior Software Engineer', company: 'Acme', skills: ['typescript'], remoteness: 'fully_remote',
+        description: 'TypeScript services.', url, publishedAt: today,
+        publicationEvidence: { url, excerpt: 'Published', observedAt: fresh },
+        availability: { url, checkedAt: fresh, outcome: 'open', httpStatus: 200, evidence: 'listing' } });
+    }));
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false, generatedAt: fresh, store, counts: { captured: 2 } }));
+
+    // Los locks del CICLO, tomados. Antes esto bastaba para matar el corte.
+    await writeFile(join(root, 'data/automation.lock'), `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+    await writeFile(join(root, 'data/source-cycle.json.lock'), `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+    assert.equal(await sourcesMain(['--digest'], root), 0, 'el corte sale aunque el ciclo esté corriendo');
+    assert.match(await readFile(join(root, 'data/digest', `${today}.md`), 'utf8'), /# Ofertas del/);
+    assert.equal(parseLedger(JSON.parse(await readFile(join(root, 'data/delivered.json'), 'utf8'))).entries.length, 2);
+
+    // Lo que SÍ serializa es su propia anotación: dos digests a la vez duplicarían la entrega.
+    await writeFile(join(root, 'data/delivered.json.lock'), `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+    assert.equal(await sourcesMain(['--digest'], root), 3, 'el lock del ledger sí lo detiene');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -228,10 +228,23 @@ export async function computeDigest(options: { root?: string; now?: Date; profil
   };
   return { markdown: renderDigest(snapshot, { date, profile }), metric, snapshot, ledger, profile, date, now };
 }
+/**
+ * Entrega el corte del día y lo anota.
+ *
+ * El lock es el del LEDGER, no el del ciclo. Sostenía `data/automation`, que es el mismo que toma
+ * `runSources`, así que el corte de las 06:00 moría con `source_lock_busy` cada vez que el ciclo
+ * horario estuviera corriendo —medido el 2026-10-01: no hubo digest ese día por esto—. Y perder el
+ * corte diario por un ciclo que ya terminará solo es perder justo lo que el proyecto entrega.
+ *
+ * El digest no escribe el checkpoint: lo LEE, y las escrituras del proyecto son atómicas (temporal y
+ * rename), así que no hay estado a medio escribir que leer. Lo que sí tiene que serializar es su
+ * propia anotación, porque dos digests a la vez duplicarían la entrega en el ledger. Ese es
+ * `delivered.json`, y ese es el lock que toma.
+ */
 export async function runDigest(options: { root?: string; now?: Date } = {}) {
   const root = options.root ?? repositoryRoot, data = join(root, 'data');
   await mkdir(join(data, 'digest'), { recursive: true, mode: 0o700 });
-  return withMailLock(join(data, 'automation'), async () => {
+  return withMailLock(join(data, 'delivered.json'), async () => {
     const { markdown, metric, snapshot, ledger, date, now } = await computeDigest({ root, now: options.now });
     await atomicWriteText(join(data, 'digest', `${date}.md`), markdown);
     await atomicMailWrite(join(data, 'delivered.json'), recordDelivery(ledger, snapshot.recommendations.map(r => r.id), now.toISOString()));
