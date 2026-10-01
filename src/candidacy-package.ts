@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { buildCandidacyBrief, candidacyGate, renderCandidacyMarkdown, type CandidacyRecord, type CandidateFacts } from './candidacy.ts';
 import { beforeSending, renderCoverLetterDraft, renderTailoredCv, selectAchievements } from './application-draft.ts';
 import { deliverable, reviewCandidacy, type Finding } from './candidacy-review.ts';
+import { interviewBrief, renderInterviewBrief } from './interview.ts';
 import type { Profile } from './contracts.ts';
 import { compilePdf, renderCoverLetterTex, renderCvTex, verifyAtsLayer, type AtsReport, type Engine } from './pdf.ts';
 
@@ -56,6 +57,14 @@ export function buildCandidacyPackage(record: CandidacyRecord, factsByFamily: Re
       { name: 'cv.md', contents: cv },
       { name: 'review.json', contents: `${JSON.stringify({ schemaVersion: 1, opportunityId: record.id, roleFamily: family,
         deliverable: deliverable(findings), findings, beforeSending: beforeSending(record.opportunity, profile) }, null, 2)}\n` },
+      /**
+       * El brief de entrevista se escribe JUNTO al material, no cuando llega la entrevista.
+       *
+       * Para entonces el paquete ya se envió y lo único que importa es qué afirmaba — y buscarlo
+       * semanas después, entre carpetas, es justo cuando uno se contradice con su propio CV. Aquí
+       * queda al lado de lo que se mandó, y se genera del mismo cruce, así que no puede divergir.
+       */
+      { name: 'interview.md', contents: renderInterviewBrief(interviewBrief({ facts, opportunity: record.opportunity, profile, matched })) },
     ] };
 }
 

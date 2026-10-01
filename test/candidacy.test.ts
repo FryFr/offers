@@ -134,7 +134,7 @@ test('CLI opt-in genera solo briefs elegibles y no toca drafts', async () => {
     // desde una fila del tablero se llega a la carpeta copiando esa celda.
     assert.deepEqual(await readdir(candidacyDirectory), [identity(eligible)], 'la stale no genera paquete');
     const path = join(candidacyDirectory, identity(eligible), 'cv.md');
-    assert.deepEqual((await readdir(join(candidacyDirectory, identity(eligible)))).sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'review.json']);
+    assert.deepEqual((await readdir(join(candidacyDirectory, identity(eligible)))).sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'interview.md', 'review.json']);
     const contents = await readFile(path, 'utf8');
     const before = await stat(path);
     const second = spawnSync(process.execPath, args, { input: JSON.stringify([eligible, blocked]), encoding: 'utf8' });

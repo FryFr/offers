@@ -77,7 +77,7 @@ const quote = (field: string, value: string) => `${field}:"${value.length > 120 
  * Reemplaza la igualdad exacta contra `opportunity.skills`, que da 0 para todo lo ingestado
  * automáticamente porque los adaptadores escriben `skills: []`.
  */
-function skillHit(haystack: string, skill: string, aliases: Record<string, string[]>): string | undefined {
+export function skillHit(haystack: string, skill: string, aliases: Record<string, string[]>): string | undefined {
   for (const variant of [skill, ...(aliases[skill] ?? [])]) {
     const needle = canonical(variant);
     if (contains(haystack, needle)) return variant;

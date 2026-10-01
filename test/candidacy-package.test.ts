@@ -32,7 +32,7 @@ const record = (overrides: Partial<Opportunity> = {}) => report(ingest({ version
 test('el paquete lleva ficha, carta, CV y revisión, y la familia decide el CV', () => {
   const pack = buildCandidacyPackage(record(), byFamily, profile) as CandidacyPackage;
   assert.equal(pack.roleFamily, 'ai_automation');
-  assert.deepEqual(pack.files.map(f => f.name).sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'review.json']);
+  assert.deepEqual(pack.files.map(f => f.name).sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'interview.md', 'review.json']);
   assert.equal(pack.deliverable, true);
   // El CV que viaja es el de la familia de la oferta, con SU titular.
   assert.match(pack.files.find(f => f.name === 'cv.md')!.contents, /AI & Automation Engineer/);
@@ -69,8 +69,8 @@ test('la escritura es atómica, idempotente por bytes y no deja temporales', asy
   try {
     const pack = buildCandidacyPackage(record(), byFamily, profile) as CandidacyPackage;
     const first = await writeCandidacyPackage(directory, pack);
-    assert.deepEqual(first.changed.sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'review.json']);
-    assert.deepEqual((await readdir(first.path)).sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'review.json'], 'sin temporales huérfanos');
+    assert.deepEqual(first.changed.sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'interview.md', 'review.json']);
+    assert.deepEqual((await readdir(first.path)).sort(), ['brief.md', 'cover-letter.md', 'cv.md', 'interview.md', 'review.json'], 'sin temporales huérfanos');
     const before = await stat(join(first.path, 'cv.md'));
     const contents = await readFile(join(first.path, 'cv.md'), 'utf8');
 
