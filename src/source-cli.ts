@@ -13,6 +13,7 @@ import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNot
 import { createNotionTransport } from './notion-transport.ts';
 import { pageBody } from './notion-body.ts';
 import { boardEvents, readBoard } from './notion-board.ts';
+import { renderUpskill, upskillReport } from './upskill.ts';
 import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
 import type { Provenance } from './source-adapters.ts';
 import { fetchRegister, registerIndex, type SponsorRegister } from './uk-sponsors.ts';
@@ -421,6 +422,7 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       + 'bin/offers --vacuum [--dry-run|--apply]      informa (o aplica) la purga del checkpoint\n'
       + 'bin/offers --pull-status [--dry-run]         lee los Estado del tablero -> eventos de seguimiento\n'
       + 'bin/offers --funnel [--cutoff TS]            embudo de postulaciones al corte\n'
+      + 'bin/offers --upskill [--json]                que piden las ofertas que te sirven y no declaras\n'
       + 'bin/offers --probe-source ADAPTADOR TOKEN     sondea un board antes de anadirlo (solo lectura)\n'
       + 'bin/offers --digest-preview [--now TS] [--profile RUTA]\n'
       + '                                             imprime el corte SIN anotarlo: ni ledger, ni metricas\n'
@@ -469,6 +471,17 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       if (message === 'notion_sync_disabled') { console.error(message); return 5; }
       console.error(notionFailure(error).code); return 4;
     }
+  }
+  if (args[0] === '--upskill') {
+    const asJson = args.length === 2 && args[1] === '--json';
+    if (!(args.length === 1 || asJson)) { console.error('upskill_arguments'); return 2; }
+    try {
+      const { snapshot } = await computeDigest({ root });
+      const profile = parseProfile(await json(join(root, 'examples/profile.json')));
+      const report = upskillReport(snapshot.records, profile);
+      console.log(asJson ? JSON.stringify(report) : renderUpskill(report));
+      return 0;
+    } catch (error) { console.error(error instanceof Error ? error.message : 'upskill_failed'); return 4; }
   }
   if (args[0] === '--funnel') {
     const cutoffAt = args.length === 3 && args[1] === '--cutoff' ? args[2] : undefined;
