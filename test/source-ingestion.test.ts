@@ -11,7 +11,7 @@ import { parseOpportunity, parseProfile } from '../src/contracts.ts';
 import { emptyLedger, recordDelivery } from '../src/delivery-ledger.ts';
 import { relevance } from '../src/relevance.ts';
 import { identity, ingest, report } from '../src/pipeline.ts';
-import { runSources, runNotionSync, sourceHealth, parseSourceState, sourcesMain } from '../src/source-cli.ts';
+import { runSources, runNotionSync, sourceHealth, parseSourceState, sourceContributed, sourcesMain } from '../src/source-cli.ts';
 import { upsertNotionRecords, compactNotionPlan, type HttpTransport } from '../src/notion-sync.ts';
 const now = new Date('2026-09-19T12:00:00Z'), profile = parseProfile({});
 const config = { enabled: false, dataSourceId: '12345678-1234-1234-1234-123456789012', externalKeyProperty: 'External key' };
@@ -270,9 +270,11 @@ test('la salud se decide por quórum, no por unanimidad', async () => {
   const root = await mkdtemp(join(tmpdir(), 'offers-quorum-'));
   try {
     await mkdir(join(root, 'data'));
-    const checkpoint = (statuses: string[]) => JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false, generatedAt: now.toISOString(),
-      health: statuses.map((status, i) => ({ sourceId: `s${i}`, status, fetched: 0, rejected: 0, checkedAt: now.toISOString() })) });
-    const write = (statuses: string[]) => writeFile(join(root, 'data/source-cycle.json'), checkpoint(statuses));
+    // `fetched` viaja porque un `partial` con filas y uno sin filas NO son lo mismo para el quórum.
+    const checkpoint = (statuses: (string | [string, number])[]) => JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false, generatedAt: now.toISOString(),
+      health: statuses.map((entry, i) => { const [status, fetched] = typeof entry === 'string' ? [entry, 0] : entry;
+        return { sourceId: `s${i}`, status, fetched, rejected: 0, checkedAt: now.toISOString() }; }) });
+    const write = (statuses: (string | [string, number])[]) => writeFile(join(root, 'data/source-cycle.json'), checkpoint(statuses));
     const many = (n: number, status: string) => Array.from({ length: n }, () => status);
     // Una rota de veinte no puede dejar sin ofertas a nadie por un 429 ajeno.
     await write([...many(19, 'ok'), 'failed']);
@@ -288,7 +290,32 @@ test('la salud se decide por quórum, no por unanimidad', async () => {
     assert.equal((await sourceHealth(root, now)).healthy, true);
     await write(many(3, 'disabled'));
     assert.equal((await sourceHealth(root, now)).healthy, false, 'un ciclo sin ninguna fuente activa no sirve para sincronizar');
+    // Un `partial` productivo no es una degradación, y se nombra aparte para que siga visible sin
+    // disfrazarse de avería. Cinco de veinte `failed` rompen el quórum; cinco `partial` con filas no.
+    await write([...many(15, 'ok'), ...Array.from({ length: 5 }, () => ['partial', 120] as [string, number])]);
+    const productivo = await sourceHealth(root, now);
+    assert.equal(productivo.healthy, true, '75% ok + 25% partial productivo sigue siendo un ciclo fiable');
+    assert.deepEqual(productivo.quorum?.degraded, [], 'lo que entregó filas no entra en la lista de problemas');
+    assert.deepEqual(productivo.quorum?.partial, ['s15:120', 's16:120', 's17:120', 's18:120', 's19:120']);
+    // Y sin filas, los mismos cinco sí rompen el quórum: la parada elegante no salvó nada.
+    await write([...many(15, 'ok'), ...many(5, 'partial')]);
+    assert.equal((await sourceHealth(root, now)).healthy, false, 'cinco paradas vacías de veinte no son fiables');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+test('una fuente que entregó filas aportó, aunque su paginación se haya parado', () => {
+  // `freehire` entrega 1.899 de sus ~1.943 ofertas y el proveedor deja colgada la última página.
+  // Eso es una fuente que funcionó. Contarla como averiada la deja en la lista de problemas TODOS
+  // los días, y un aviso permanente sobre algo que funciona entrena a ignorar el monitor.
+  assert.equal(sourceContributed({ status: 'partial', fetched: 1899 }), true);
+  // Pero una parada elegante que no salvó nada no salvó nada.
+  assert.equal(sourceContributed({ status: 'partial', fetched: 0 }), false);
+  assert.equal(sourceContributed({ status: 'ok', fetched: 0 }), true, 'un tablero vacío respondió');
+  assert.equal(sourceContributed({ status: 'not_due' }), true, 'la cadencia no es una avería');
+  assert.equal(sourceContributed({ status: 'failed', fetched: 0 }), false);
+  // La misma regla la usan `--health` y el código de salida del ciclo. Durante un día tuvieron
+  // reglas distintas y daban dos verdades sobre la misma corrida: el quórum decía 31/33 mientras el
+  // ciclo contaba a `freehire` como roto y salía 6 cada hora.
+  assert.equal(sourceContributed({ status: 'failed', fetched: 10 }), false, 'un fallo no se redime por filas previas');
 });
 test('un checkpoint ausente no es una degradación: --health sale 0 hasta el primer ciclo', async () => {
   const root = await mkdtemp(join(tmpdir(), 'offers-health-'));

@@ -277,6 +277,21 @@ export async function previewDigest(options: { root?: string; now?: Date; profil
 export type HealthReason = 'no_checkpoint' | 'checkpoint_degraded';
 /** Proporción de fuentes habilitadas que deben estar sanas para considerar utilizable el ciclo. */
 export const HEALTH_QUORUM = 0.8;
+/**
+ * ¿Esta fuente aportó al ciclo?
+ *
+ * `ok` y `not_due` sí, obviamente. Y un `partial` CON filas también: `freehire` entrega 1.899 de sus
+ * ~1.943 ofertas y entonces el proveedor deja colgada la última página. Eso es una fuente que
+ * funcionó, no una avería, y contarla como degradada la deja en la lista de problemas todos los días.
+ *
+ * Un `partial` SIN filas sí cuenta como degradado: ahí la parada elegante no salvó nada.
+ *
+ * Vive aquí, a nivel de módulo, porque `--health` y el código de salida del ciclo lo necesitan los
+ * dos y durante un día tuvieron reglas distintas: `--health` decía quórum 31/33 mientras el ciclo
+ * contaba a `freehire` como roto. Dos verdades sobre la misma corrida es una de más.
+ */
+export const sourceContributed = (s: { status?: string; fetched?: number }): boolean =>
+  ['ok', 'not_due'].includes(s.status ?? '') || (s.status === 'partial' && (s.fetched ?? 0) > 0);
 /** Lo único que `sourceHealth` necesita del ciclo, y nada más. Unos pocos KB. */
 interface HealthSnapshot { generatedAt?: string; health?: { status?: string; sourceId?: string; fetched?: number }[]; mode?: string; confirmed?: boolean; counts?: unknown }
 /**
@@ -307,21 +322,14 @@ export async function sourceHealth(root = repositoryRoot, now = new Date()) {
   /**
    * Una fuente CONTRIBUYÓ si entregó filas, aunque su estado sea `partial`.
    *
-   * El quórum juzga si el CICLO sirve, no si cada proveedor se portó perfecto. `freehire` entrega
-   * 1.899 de sus ~1.943 ofertas y entonces el proveedor deja colgada la última página: se reporta
-   * `partial` con `paged_request_timeout`, que es honesto, pero contarlo como degradado lo deja en la
-   * lista de problemas TODOS los días. Un aviso permanente sobre algo que funciona es exactamente lo
-   * que entrena a ignorar el monitor, y este proyecto ya eligió quórum sobre unanimidad por ese mismo
-   * motivo.
-   *
-   * Un `partial` SIN filas sí cuenta como degradado: ahí la parada elegante no salvó nada.
+   * El quórum juzga si el CICLO sirve, no si cada proveedor se portó perfecto. La regla de qué cuenta
+   * como aportar vive en `sourceContributed`, compartida con el código de salida del ciclo.
    */
-  const contributed = (s: { status?: string; fetched?: number }) => ['ok', 'not_due'].includes(s.status ?? '') || (s.status === 'partial' && (s.fetched ?? 0) > 0);
-  const working = enabled.filter(contributed);
+  const working = enabled.filter(sourceContributed);
   const ratio = enabled.length ? working.length / enabled.length : 0;
   const healthy = fresh && enabled.length > 0 && ratio >= HEALTH_QUORUM;
   const quorum = { working: working.length, enabled: enabled.length, required: HEALTH_QUORUM,
-    degraded: enabled.filter(s => !contributed(s)).map(s => s.sourceId ?? '?'),
+    degraded: enabled.filter(s => !sourceContributed(s)).map(s => s.sourceId ?? '?'),
     // Lo que entregó pese a no terminar se nombra aparte: sigue visible sin disfrazarse de avería.
     partial: enabled.filter(s => s.status === 'partial' && (s.fetched ?? 0) > 0).map(s => `${s.sourceId ?? '?'}:${s.fetched}`) };
   return { healthy, ...(healthy ? {} : { reason: 'checkpoint_degraded' as HealthReason }), mode: 'dry-run', confirmed: false, generatedAt: checkpoint.generatedAt, counts: checkpoint.counts, quorum };
@@ -622,14 +630,26 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
     const stopHeapTracking = trackHeapPeak();
     const result = await runSources({ root, enrichModel: args[2] });
     console.log(JSON.stringify({ mode: result.mode, confirmed: false, counts: result.counts, heapPeakMb: stopHeapTracking(), health: result.health }));
-    // El quórum manda también aquí: una fuente rota de veinte no convierte un ciclo útil en un
-    // fallo. El 4 queda para cuando la mayoría no respondió y el resultado no es fiable.
+    /**
+     * El código de salida responde UNA pregunta: ¿se puede confiar en el resultado de esta corrida?
+     * No responde "¿se portó bien cada proveedor?" — eso lo contesta `--health`, que además mira el
+     * historial y sabe distinguir una caída puntual de una avería, cosa que una sola corrida no puede.
+     *
+     * Hasta hoy devolvía 6 si CUALQUIER fuente quedaba `partial` o `failed`. Con 33 fuentes siempre
+     * hay alguna que da timeout, y `freehire` es `partial` permanente por diseño, así que el ciclo
+     * salía 6 todas las horas de todos los días. Un semáforo en ámbar permanente no es un semáforo:
+     * es la misma enfermedad que el quórum ya había curado en `--health`, viva a cuatro líneas de
+     * distancia. Nadie consumía ese 6 salvo la columna de `launchctl list`, y ahí es donde más daño
+     * hacía.
+     *
+     * El 6 no queda huérfano: sigue significando `checkpoint_unhealthy` en `--sync`. Ahora significa
+     * una sola cosa en todo el archivo — "no confíes en este dato" — en vez de dos.
+     */
     const enabledSources = result.health.filter(s => s.status !== 'disabled');
-    const workingSources = enabledSources.filter(s => ['ok', 'not_due'].includes(s.status));
+    const workingSources = enabledSources.filter(sourceContributed);
     // Un registro con todo deshabilitado no es un fallo del ciclo sino una configuración: el ciclo
     // hizo lo que se le pidió. Es `--health` quien debe marcar que ese checkpoint no sirve.
     if (enabledSources.length && workingSources.length / enabledSources.length < HEALTH_QUORUM) return 4;
-    if (result.health.some(s => s.status === 'partial' || s.status === 'failed')) return 6;
     // Sin data/notion-local.json no hay esquema que verificar y el ciclo fue un éxito completo.
     // El 5 queda para el caso real: el operador declaró un destino Notion y no lo verificó.
     if (!result.notionLocalPresent) return 0;

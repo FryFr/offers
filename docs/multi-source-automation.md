@@ -184,7 +184,33 @@ hecha` does. A scheduled interview can still be cancelled.
 
 ## Health and recovery
 
-CLI exits: 0 completed plan, 2 invalid arguments, 3 occupied lock, 4 configuration/source/persistence/health failure, 5 unverified schema with blocked records, 6 partial source data. An empty or all-disabled cycle can return 0 locally, but health and n8n ingestion checks flag it. Blocked jobs from missing evidence are expected and distinct from failed sources. A fresh health checkpoint requires an enabled healthy source and no failed/partial sources; snapshots older than 24 hours or future-dated snapshots fail. Source failures remain unhealthy during cooldown. Enrichment warnings are visible in local captures and do not redefine source transport health.
+CLI exits: 0 completed plan, 2 invalid arguments, 3 occupied lock, 4 configuration/source/persistence/health
+failure, 5 unverified schema with blocked records, 6 untrustworthy data, 8 Notion schema mismatch, 9 an
+unmapped board value.
+
+An exit code answers one question -- can this run's result be trusted? -- and nothing else. It used to
+return 6 whenever ANY source came back `partial` or `failed`, which with 33 sources meant every hour of
+every day, because some provider always times out and `freehire` stops its pagination by design. A light
+that is permanently amber is not a light. Nothing consumed that code except the exit column of
+`launchctl list`, which is exactly where it did the most damage. The cycle now returns 4 when the quorum
+breaks and 0 otherwise; 6 is left to mean `checkpoint_unhealthy` in `--sync`, so it says one thing in the
+whole file instead of two.
+
+Which source degraded is `--health`'s question, not the exit code's, and `--health` answers it better
+because it reads the checkpoint's history and can tell a one-off timeout from a real outage. A single run
+cannot. The `offers-status` agent surfaces it.
+
+A source counts as having contributed when it is `ok`, `not_due`, or `partial` **with rows**: `freehire`
+delivers 1,899 of its ~1,943 offers and then the provider leaves the last page hanging, which is a source
+that worked. A `partial` with zero rows counts as degraded -- there the graceful stop saved nothing. That
+rule is `sourceContributed` in `src/source-cli.ts`, shared by `--health` and the cycle's exit code,
+because for a day they held different rules and reported two truths about the same run.
+
+An empty or all-disabled cycle can return 0 locally, but health and n8n ingestion checks flag it. Blocked
+jobs from missing evidence are expected and distinct from failed sources. A health checkpoint needs 80% of
+its enabled sources to have contributed; snapshots older than 24 hours or future-dated snapshots fail.
+Source failures remain unhealthy during cooldown. Enrichment warnings are visible in local captures and do
+not redefine source transport health.
 
 Inspect `health`, `counts`, `jobs[].warnings`, `notionPlan.blocked` and provenance locally. On 403/429, respect provider policy; reduce cadence or disable that source. Do not add bypasses. For malformed feed data, retain the failed status and update fixtures/adapters after reviewing the provider contract. A schema gate failure requires local mapping review, not a live write attempt.
 
