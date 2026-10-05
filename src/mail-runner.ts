@@ -79,6 +79,47 @@ export async function withMailLock<T>(path: string, run: () => Promise<T>): Prom
   finally { await lock.close(); await rm(`${path}.lock`, { force: true }); }
 }
 
+/**
+ * Toma el lock, y si está ocupado ESPERA y vuelve a intentar en vez de rendirse.
+ *
+ * `withMailLock` falla al instante, y para el correo eso es correcto. Para el ciclo horario no: su
+ * agente de launchd reinicia el contador cuando el trabajo TERMINA, así que un `source_lock_busy`
+ * que sale en menos de un segundo no cuesta un segundo — cuesta la hora entera hasta el siguiente
+ * disparo. Medido sobre el sistema vivo: 38 de 229 corridas perdidas así, con un hueco de 700
+ * minutos el 2026-10-04 y otro de 11 horas el 2026-10-05.
+ *
+ * Peor aún, antes de pasar a minuto fijo el disparo DERIVABA: cada corrida tarda ~103 s y el
+ * contador arrancaba al terminar, así que el ciclo caminaba +103 s por hora alrededor del reloj. Al
+ * entrar en la ventana de otro agente chocaba, salía en un instante, y la deriva se CONGELABA —el
+ * siguiente disparo caía en el mismo segundo— así que seguía chocando hora tras hora. Una trampa de
+ * fase. El minuto fijo mata la deriva; este reintento cubre lo que quede.
+ *
+ * Las esperas por defecto cubren a los dos que de verdad sostienen el lock del checkpoint: el sync
+ * lo tiene ~27 s (lo domina `report()` con 26,4 s sobre 22.061 registros) y la purga ~1 min.
+ *
+ * `sleep` se inyecta para que las pruebas no esperen de verdad.
+ *
+ * CUIDADO: si `run` falla por un lock ANIDADO, se reintenta `run` completo. Solo es seguro cuando
+ * entre el lock externo y el interno no hay efectos — es el caso del ciclo, donde lo único que pasa
+ * entre `data/automation` y `data/source-cycle.json` es tomar el segundo lock.
+ */
+export async function withMailLockRetrying<T>(path: string, run: () => Promise<T>,
+  options: { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<T> {
+  const attempts = options.attempts ?? 3;
+  const delayMs = options.delayMs ?? 75_000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try { return await withMailLock(path, run); }
+    catch (error) {
+      const busy = error instanceof Error && error.message.includes('existe .lock');
+      // Un fallo que no es contención se propaga intacto: reintentar un checkpoint corrupto lo
+      // corrompe tres veces.
+      if (!busy || attempt >= attempts) throw error;
+      await sleep(delayMs);
+    }
+  }
+}
+
 /** Delivery is at least once. Resolve only after durable consumption; replay must be idempotent. */
 export async function runMailAlerts(options: MailRunnerOptions, deliver: (envelope: ExternalAlertEnvelope) => Promise<void>, command: Command = himalayaCommand): Promise<void> {
   const { account, cursorPath } = options;

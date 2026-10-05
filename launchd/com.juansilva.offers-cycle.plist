@@ -3,10 +3,41 @@
      Plantilla versionada: el original vive en ~/Library/LaunchAgents, que no se respalda
      ni se versiona. Instalar con `make install-agents` o copiando el archivo.
 
-     StartInterval sobre cron a propósito: si el Mac está dormido a la hora agendada, cron
-     PIERDE la corrida; launchd la ejecuta al despertar y agrupa las perdidas en un disparo.
-     Conectado a la corriente el Mac no duerme (pmset sleep 0), así que el ciclo corre;
-     con batería duerme al minuto y no corre. Esa es la limitación conocida de correr local.
+     MINUTO FIJO (:50), y antes era `StartInterval 3600`. El cambio viene de operarlo y de
+     leer el manual, que dice LO CONTRARIO de lo que este comentario afirmaba antes.
+
+     `man 5 launchd.plist`, textual:
+       StartInterval         — "If the system is asleep during the time of the next scheduled
+                               interval firing, that interval will be MISSED due to shortcomings
+                               in kqueue(3). If the job is running during an interval firing,
+                               that interval firing will likewise be missed."
+       StartCalendarInterval — "Unlike cron which skips job invocations when the computer is
+                               asleep, launchd will start the job the next time the computer
+                               wakes up. If multiple intervals transpire before the computer is
+                               woken, those events will be coalesced into one event upon wake."
+
+     O sea: el que pierde corridas al dormir es `StartInterval`, y el calendario es el que las
+     recupera al despertar. Se había elegido `StartInterval` por la creencia opuesta.
+
+     Y esa creencia costó caro, porque `StartInterval` reinicia su contador cuando el trabajo
+     TERMINA. Cada corrida tarda ~103 s, así que el disparo DERIVABA +103 s por hora y caminaba
+     alrededor del reloj. Al entrar en la ventana de otro agente chocaba con `source_lock_busy`,
+     salía en menos de un segundo, y ahí la deriva se CONGELABA —el siguiente disparo caía en el
+     mismo segundo— así que seguía chocando hora tras hora. Una trampa de fase.
+
+     Medido sobre el sistema vivo: 38 de 229 corridas perdidas, un hueco de 700 minutos el
+     2026-10-04 y otro de 11 horas el 2026-10-05, con el error log clavado al :21.
+
+     POR QUÉ EL :50 y no otro minuto: es el único hueco limpio. El sync toma el lock del
+     checkpoint al :20 y lo sostiene ~27 s (lo domina `report()` con 26,4 s sobre 22.061
+     registros). La purga corre a los :30 cuatro veces al día. El corte diario va a las 06:00 y
+     `--pull-status` a las 06:40. El :50 no toca a ninguno.
+
+     El reintento de `withMailLockRetrying` cubre lo que el horario no puede prever —una purga
+     que se alargue, una corrida a mano— esperando 75 s hasta 3 veces en vez de perder la hora.
+
+     Limitación que SIGUE en pie: con batería el Mac duerme al minuto. Ahora las corridas
+     dormidas se recuperan al despertar en vez de perderse, pero agrupadas en una sola.
 
      RunAtLoad queda en false: cargar el agente no debe disparar red inmediatamente.
      La primera corrida se fuerza a mano con
@@ -24,7 +55,10 @@
     <string>--dry-run</string>
   </array>
   <key>WorkingDirectory</key>   <string>/Users/juansilva/Documents/offers</string>
-  <key>StartInterval</key>      <integer>3600</integer>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Minute</key><integer>50</integer></dict>
+  </array>
   <key>RunAtLoad</key>          <false/>
   <key>StandardOutPath</key>    <string>/Users/juansilva/Documents/offers/data/logs/cycle.out.log</string>
   <key>StandardErrorPath</key>  <string>/Users/juansilva/Documents/offers/data/logs/cycle.err.log</string>

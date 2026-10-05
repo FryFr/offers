@@ -302,6 +302,39 @@ test('la salud se decide por quórum, no por unanimidad', async () => {
     assert.equal((await sourceHealth(root, now)).healthy, false, 'cinco paradas vacías de veinte no son fiables');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+test('el ciclo ESPERA por el lock en vez de perder la hora entera', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'offers-lockwait-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), '{}');
+    // Fuentes deshabilitadas: el ciclo no toca la red.
+    await writeFile(join(root, 'examples/sources.json'), JSON.stringify({ version: 1, sources: [{ id: 'ashby', adapter: 'ashby', enabled: false, board: 'acme', company: 'Acme' }] }));
+    // El lock ya está tomado, como cuando el sync está leyendo el checkpoint (~27 s) o la purga
+    // corre (~1 min). Rendirse aquí no cuesta el segundo que tarda en rendirse: cuesta los 60
+    // minutos hasta el siguiente disparo de launchd, que reinicia su contador al TERMINAR el trabajo.
+    await writeFile(join(root, 'data/automation.lock'), '99999\n');
+    const waits: number[] = [];
+    const sleep = async (ms: number) => { waits.push(ms); await rm(join(root, 'data/automation.lock'), { force: true }); };
+    await runSources({ root, now, lock: { attempts: 3, delayMs: 75_000, sleep } });
+    assert.deepEqual(waits, [75_000], 'esperó una vez y entró en el segundo intento');
+    const disk = JSON.parse(await readFile(join(root, 'data/source-cycle.json'), 'utf8'));
+    assert.equal(disk.mode, 'dry-run', 'el ciclo completó: el checkpoint quedó escrito');
+    // Y agotar los intentos sí falla, para no esperar indefinidamente contra un lock huérfano: los
+    // locks de este proyecto NUNCA se roban solos.
+    await writeFile(join(root, 'data/automation.lock'), '99999\n');
+    const vanos: number[] = [];
+    await assert.rejects(runSources({ root, now, lock: { attempts: 2, delayMs: 1, sleep: async (ms: number) => { vanos.push(ms); } } }),
+      /existe \.lock/, 'un lock que no se suelta sigue siendo un fallo');
+    assert.deepEqual(vanos, [1], 'con 2 intentos se espera 1 vez, no 2');
+    await rm(join(root, 'data/automation.lock'), { force: true });
+    // Un fallo que NO es contención se propaga intacto: reintentar un checkpoint corrupto lo
+    // corrompería tres veces.
+    await writeFile(join(root, 'data/source-cycle.json'), '{malformed');
+    const noReintentos: number[] = [];
+    await assert.rejects(runSources({ root, now, lock: { attempts: 3, delayMs: 1, sleep: async (ms: number) => { noReintentos.push(ms); } } }));
+    assert.deepEqual(noReintentos, [], 'un checkpoint ilegible no se reintenta');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 test('una fuente que entregó filas aportó, aunque su paginación se haya parado', () => {
   // `freehire` entrega 1.899 de sus ~1.943 ofertas y el proveedor deja colgada la última página.
   // Eso es una fuente que funcionó. Contarla como averiada la deja en la lista de problemas TODOS

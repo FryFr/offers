@@ -5,7 +5,7 @@ import { parseProfile } from './contracts.ts';
 import { parseLedger, deliveredIds, recordDelivery } from './delivery-ledger.ts';
 import { renderDigest } from './digest.ts';
 import { compactHistory, parseStore, pruneStore, report } from './pipeline.ts';
-import { atomicMailWrite, atomicWriteText, withMailLock } from './mail-runner.ts';
+import { atomicMailWrite, atomicWriteText, withMailLock, withMailLockRetrying } from './mail-runner.ts';
 import { parseRegistry, AGGREGATOR_ADAPTERS } from './source-registry.ts';
 import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
@@ -33,10 +33,13 @@ export function parseSourceState(value: unknown): SourceState {
   return { version: 1, lastAttempt: { ...s.lastAttempt }, lastResult: { ...s.lastResult } };
 }
 /** One atomic checkpoint includes store, provenance, cadence and dry-run plan; no production transport. */
-export async function runSources(options: { root?: string; enrichModel?: string; now?: Date; dependencies?: Pick<CycleOptions, 'transport' | 'resolveHost' | 'htmlFetch' | 'env' | 'enrich'> } = {}) {
+export async function runSources(options: { root?: string; enrichModel?: string; now?: Date; lock?: { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> }; dependencies?: Pick<CycleOptions, 'transport' | 'resolveHost' | 'htmlFetch' | 'env' | 'enrich'> } = {}) {
   const root = options.root ?? repositoryRoot, data = join(root, 'data');
   await mkdir(data, { recursive: true, mode: 0o700 });
-  return withMailLock(join(data, 'automation'), () => withMailLock(join(data, 'source-cycle.json'), async () => {
+  // El ciclo ESPERA por el lock: rendirse le cuesta la hora entera hasta el siguiente disparo, no el
+  // segundo que tarda en rendirse. El resto de subcomandos sigue fallando al instante, porque los
+  // corre una persona que está mirando y puede volver a intentarlo.
+  return withMailLockRetrying(join(data, 'automation'), () => withMailLock(join(data, 'source-cycle.json'), async () => {
     const sources = parseRegistry(await json(join(root, 'examples/sources.json')));
     const profile = parseProfile(await json(join(root, 'examples/profile.json')));
     const prior = await optionalJson(join(data, 'source-cycle.json')) as Record<string, unknown> | undefined;
@@ -85,7 +88,7 @@ export async function runSources(options: { root?: string; enrichModel?: string;
     // exit 5: sin archivo (no hay Notion que verificar), con archivo sin verificar (sí alerta),
     // y con archivo verificado (el planificador decide).
     return { ...result, notionLocalPresent: local !== undefined };
-  }));
+  }), options.lock ?? {});
 }
 /**
  * Pico de heap del ciclo, en MB. Aproximado: el muestreo no corre durante bloques síncronos
