@@ -9,12 +9,12 @@ import { atomicMailWrite, atomicWriteText, withMailLock, withMailLockRetrying } 
 import { parseRegistry, AGGREGATOR_ADAPTERS } from './source-registry.ts';
 import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from './multi-source.ts';
 import { createClaudeEnricher } from './claude-enrichment.ts';
-import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
+import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, DEFAULT_PACING_MS, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
 import { pageBody } from './notion-body.ts';
 import { parseCandidateFacts, type CandidateFacts } from './candidacy.ts';
 import { selectAchievements, renderCoverLetterDraft, renderTailoredCv } from './application-draft.ts';
-import { boardEvents, readBoard } from './notion-board.ts';
+import { boardEvents, readBoard, queryAllRowsRequest, archiveRowRequest } from './notion-board.ts';
 import { renderUpskill, upskillReport } from './upskill.ts';
 import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
 import type { Provenance } from './source-adapters.ts';
@@ -169,6 +169,53 @@ export async function vacuumCheckpoint(options: { root?: string; now?: Date; app
   if (options.apply === true) await atomicMailWrite(path, next);
   return report;
 }
+/**
+ * Archiva TODAS las filas del tablero. El punto de partida limpio.
+ *
+ * POR QUÉ HACE FALTA, y no es una preferencia: el cuerpo de una página se escribe UNA vez, cuando
+ * está vacía, y `notion-transport.ts` no admite DELETE sobre bloques a propósito —para no borrar
+ * nunca lo que Juan escriba a mano dentro—. Consecuencia: las ~2.400 páginas que ya existen tienen
+ * un cuerpo sin la carta ni el CV y NO pueden recibirlos jamás. Empezar de cero es la única vía que
+ * el diseño permite, no un atajo.
+ *
+ * ARCHIVAR, no borrar: en Notion una página archivada va a la papelera y se puede restaurar.
+ *
+ * `apply` por defecto es `false`. Sin él cuenta y no toca nada, igual que `--vacuum`: una operación
+ * que afecta miles de filas se mira antes de encenderla.
+ */
+export async function archiveBoard(options: { root?: string; apply?: boolean; pacingMs?: number;
+  dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv }; sleep?: (ms: number) => Promise<void> } = {}) {
+  const root = options.root ?? repositoryRoot, data = join(root, 'data');
+  const local = await optionalJson(join(data, 'notion-local.json')) as { schemaVerified?: unknown; config?: unknown } | undefined;
+  if (!local || local.schemaVerified !== true) throw new Error('notion_sync_disabled');
+  const config = validateNotionConfig(local.config);
+  if (!config.enabled) throw new Error('notion_sync_disabled');
+  const transport = options.dependencies?.transport ?? createNotionTransport(fetch, options.dependencies?.env ?? process.env);
+  const pacingMs = options.pacingMs ?? DEFAULT_PACING_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); }));
+  // Se recogen TODOS los ids primero y se archiva después: paginar mientras se archiva mueve el
+  // cursor bajo los pies —las filas archivadas salen del conjunto— y deja filas sin visitar.
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 500; page++) {
+    const response = await transport(queryAllRowsRequest(config, cursor));
+    if (response.status !== 200) throw new Error('board_unreadable');
+    const body = response.body as { results?: { id?: unknown }[]; has_more?: unknown; next_cursor?: unknown } | null;
+    if (!Array.isArray(body?.results)) throw new Error('board_unreadable');
+    for (const row of body.results) if (typeof row?.id === 'string') ids.push(row.id);
+    if (body.has_more !== true || typeof body.next_cursor !== 'string' || !body.next_cursor) break;
+    cursor = body.next_cursor;
+  }
+  if (options.apply !== true) return { rows: ids.length, archived: 0, failed: 0, applied: false };
+  let archived = 0, failed = 0;
+  for (const [index, id] of ids.entries()) {
+    if (index && pacingMs > 0) await sleep(pacingMs);
+    const response = await transport(archiveRowRequest(id));
+    if (response.status === 200) archived++; else failed++;
+  }
+  return { rows: ids.length, archived, failed, applied: true };
+}
+
 /**
  * Lee los `Estado` del tablero y los convierte en eventos de seguimiento.
  *
@@ -543,6 +590,19 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       console.log(JSON.stringify(await applicationFunnel({ root, ...(cutoff ? { cutoff } : {}) })));
       return 0;
     } catch (error) { console.error(error instanceof Error ? error.message : 'funnel_failed'); return 4; }
+  }
+  if (args[0] === '--archive-board') {
+    // `--apply` explícito, como en `--vacuum`: archivar miles de filas se mira antes de encenderlo.
+    const apply = args.length === 2 && args[1] === '--apply';
+    if (!(args.length === 1 || apply)) { console.error('archive_board_arguments'); return 2; }
+    try {
+      console.log(JSON.stringify(await archiveBoard({ root, apply })));
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'archive_board_failed';
+      if (message === 'notion_sync_disabled') { console.error(message); return 5; }
+      console.error(message); return 4;
+    }
   }
   if (args[0] === '--vacuum') {
     // `--dry-run` es la forma SEGURA y hay que pedir `--apply` para borrar. Al revés —borrar por

@@ -58,6 +58,29 @@ export function queryBoardRequest(value: unknown, cursor?: string): HttpRequest 
     // El cursor va en el CUERPO, no en la query string: el transporte prohíbe `url.search`.
     body: { filter: { property: 'Estado', select: { is_not_empty: true } }, page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) } };
 }
+/**
+ * TODAS las filas, sin filtrar por `Estado`.
+ *
+ * `queryBoardRequest` filtra `Estado is_not_empty` porque solo le interesan las que Juan marcó.
+ * Para archivar hace falta lo contrario: el tablero completo.
+ */
+export function queryAllRowsRequest(value: unknown, cursor?: string): HttpRequest {
+  const config = validateNotionConfig(value);
+  const target = `${config.dataSourceId ? 'data_sources' : 'databases'}/${config.dataSourceId ?? config.databaseId}`;
+  return { method: 'POST', url: `https://api.notion.com/v1/${target}/query`,
+    headers: { 'Content-Type': 'application/json', 'Notion-Version': config.dataSourceId ? '2025-09-03' : '2022-06-28' },
+    body: { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) } };
+}
+/**
+ * Manda una fila al archivo de Notion.
+ *
+ * ARCHIVAR, no borrar. En Notion una página archivada va a la papelera y se puede restaurar; el
+ * transporte además no admite DELETE en ninguna ruta. Un borrado de 2.400 filas que no se pueda
+ * deshacer no es una operación que este proyecto deba saber hacer.
+ */
+export const archiveRowRequest = (pageId: string): HttpRequest =>
+  ({ method: 'PATCH', url: `https://api.notion.com/v1/pages/${encodeURIComponent(pageId)}`, headers: {}, body: { archived: true } });
+
 const plain = (property: unknown): string | undefined => {
   const rich = (property as { rich_text?: { text?: { content?: unknown } }[] } | null)?.rich_text;
   if (!Array.isArray(rich)) return undefined;
