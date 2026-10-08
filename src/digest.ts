@@ -33,10 +33,24 @@ export const money = (o: Opportunity, profile: Profile): string => {
   return `${declared}${monthly}${pay.converted ? ' (convertido)' : ''}`;
 };
 
+/**
+ * Cuántas ubicaciones se nombran antes de resumir.
+ *
+ * Sin tope, una oferta de himalayas abierta a 190 países imprimía los 190: 2.461 caracteres, el 21%
+ * del digest del 2026-10-08 en una sola línea, mientras las otras diez ofertas gastaban entre 53 y
+ * 174. Y un digest incómodo de leer es un digest que no se lee, que es exactamente el problema que
+ * este proyecto existe para no tener.
+ */
+export const LOCATION_LIMIT = 6;
 export const place = (o: Opportunity): string => {
   const mode = o.remoteness ?? (o.remote === true ? 'fully_remote' : o.remote === false ? 'in_person' : 'unknown');
   const label = { fully_remote: 'Remoto', partially_remote: 'Parcialmente remoto', hybrid: 'Híbrido', in_person: 'Presencial', unknown: 'Modalidad no declarada' }[mode];
-  const where = o.locationRestrictions?.length ? o.locationRestrictions.join(', ') : o.location;
+  const restrictions = o.locationRestrictions ?? [];
+  // El resto se CUENTA, no se calla: "y 184 más" dice que la oferta es abierta, que es justo la
+  // señal útil. Omitirlo sin más haría creer que la lista termina ahí.
+  const where = restrictions.length
+    ? `${restrictions.slice(0, LOCATION_LIMIT).join(', ')}${restrictions.length > LOCATION_LIMIT ? ` y ${restrictions.length - LOCATION_LIMIT} más` : ''}`
+    : o.location;
   return where ? `${label} — ${where}` : label;
 };
 

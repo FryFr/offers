@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { ingest, report, identity } from '../src/pipeline.ts';
-import { renderDigest } from '../src/digest.ts';
+import { renderDigest, place, LOCATION_LIMIT } from '../src/digest.ts';
 import { parseLedger, recordDelivery, deliveredIds, pruneLedger, emptyLedger } from '../src/delivery-ledger.ts';
 import { sourcesMain } from '../src/source-cli.ts';
 
@@ -77,6 +77,24 @@ test('el digest es determinista, explica cada oferta y no rellena cuando no hay 
   const vacio = renderDigest(report({ version: 1, records: [] }, profile, now), { date: '2026-09-16', profile });
   assert.match(vacio, /no hay ninguna oferta que supere el umbral/);
   assert.match(vacio, /ampliar fuentes, no bajar el umbral/);
+});
+
+test('una oferta abierta a 190 países no se come el digest', () => {
+  // Medido en el digest del 2026-10-08: una oferta de himalayas abierta a 190 países imprimía los
+  // 190 en una línea de 2.461 caracteres, el 21% del documento, mientras las otras diez gastaban
+  // entre 53 y 174. Un digest incómodo de leer es un digest que no se lee.
+  const muchos = Array.from({ length: 190 }, (_, i) => `pais-${i}`);
+  const linea = place(parseOpportunity({ title: 'Developer', company: 'Acme', skills: [],
+    remoteness: 'fully_remote', locationRestrictions: muchos }));
+  assert.ok(linea.length < 120, `la línea mide ${linea.length} caracteres`);
+  assert.ok(linea.includes('pais-0'), 'se nombran las primeras');
+  assert.ok(!linea.includes('pais-7'), 'no las 190');
+  // El resto se CUENTA: "y 184 más" dice que la oferta es abierta, que es la señal útil.
+  assert.ok(linea.includes(`y ${190 - LOCATION_LIMIT} más`), linea);
+  // Y una lista corta se sigue imprimiendo completa, sin coletilla.
+  const pocos = place(parseOpportunity({ title: 'Developer', company: 'Acme', skills: [],
+    remoteness: 'fully_remote', locationRestrictions: ['colombia', 'mexico'] }));
+  assert.equal(pocos, 'Remoto — colombia, mexico');
 });
 
 test('el digest declara el pago con su procedencia y avisa cuando no se pudo interpretar', () => {
