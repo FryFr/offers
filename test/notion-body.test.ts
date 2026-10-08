@@ -6,6 +6,10 @@ import { DESCRIPTION_BLOCKS, MAX_CHILDREN, appendChildrenRequest, markdownBlocks
 import { parseCandidateFacts } from '../src/candidacy.ts';
 import { selectAchievements, renderCoverLetterDraft, renderTailoredCv } from '../src/application-draft.ts';
 import { ensurePageBody, type HttpTransport } from '../src/notion-sync.ts';
+import { archiveBoard } from '../src/source-cli.ts';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createNotionTransport } from '../src/notion-transport.ts';
 
 const now = new Date('2026-09-16T12:00:00Z');
@@ -145,6 +149,44 @@ test('el cuerpo se escribe una vez y NUNCA se reescribe', async () => {
   // Y una respuesta que no se puede interpretar falla en vez de suponer que la página estaba vacía.
   await assert.rejects(ensurePageBody('page-1', children, async () => ({ status: 200, body: {} })), /notion_body_unreadable/);
   await assert.rejects(ensurePageBody('page-1', children, async () => ({ status: 404, body: null })), /notion_body_unreadable/);
+});
+
+test('el archivado recoge TODOS los ids antes de archivar ninguno', async () => {
+  // Paginar mientras se archiva mueve el cursor bajo los pies: las filas archivadas salen del
+  // conjunto, el `next_cursor` apunta a un sitio que ya no existe y quedan filas sin visitar.
+  const root = await mkdtemp(join(tmpdir(), 'offers-archive-'));
+  try {
+    await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'data/notion-local.json'), JSON.stringify({ schemaVerified: true,
+      config: { enabled: true, dataSourceId: '4c2fb0a6-6c69-4fe7-9bc0-21cf0825851a', externalKeyProperty: 'External Key', propertyMap: {} } }));
+    const calls: { method: string; url: string; body: unknown }[] = [];
+    const transport: HttpTransport = async request => {
+      calls.push({ method: request.method, url: request.url, body: request.body });
+      if (request.url.includes('/query')) {
+        const first = !(request.body as { start_cursor?: string }).start_cursor;
+        return { status: 200, body: first
+          ? { results: [{ id: 'a' }, { id: 'b' }], has_more: true, next_cursor: 'c2' }
+          : { results: [{ id: 'c' }], has_more: false, next_cursor: null } };
+      }
+      return { status: 200, body: {} };
+    };
+    // Sin `apply` cuenta y NO toca nada: una operación sobre miles de filas se mira antes.
+    const seco = await archiveBoard({ root, dependencies: { transport }, sleep: async () => {} });
+    assert.deepEqual(seco, { rows: 3, archived: 0, failed: 0, applied: false });
+    assert.equal(calls.every(c => c.url.includes('/query')), true, 'un conteo no escribe');
+
+    calls.length = 0;
+    const aplicado = await archiveBoard({ root, apply: true, dependencies: { transport }, sleep: async () => {} });
+    assert.deepEqual(aplicado, { rows: 3, archived: 3, failed: 0, applied: true });
+    // Las dos consultas PRIMERO, los tres archivados DESPUÉS. Ese orden es la prueba.
+    assert.deepEqual(calls.map(c => c.url.includes('/query') ? 'query' : 'archive'),
+      ['query', 'query', 'archive', 'archive', 'archive']);
+    // Y se ARCHIVA, no se borra: PATCH con `archived: true`, nunca DELETE.
+    for (const call of calls.filter(c => !c.url.includes('/query'))) {
+      assert.equal(call.method, 'PATCH');
+      assert.deepEqual(call.body, { archived: true });
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('el transporte admite leer y AÑADIR bloques, nunca borrarlos', async () => {
