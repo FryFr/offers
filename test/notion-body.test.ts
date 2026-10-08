@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { evaluate } from '../src/evaluate.ts';
-import { DESCRIPTION_BLOCKS, MAX_CHILDREN, appendChildrenRequest, pageBody, readChildrenRequest } from '../src/notion-body.ts';
+import { DESCRIPTION_BLOCKS, MAX_CHILDREN, appendChildrenRequest, markdownBlocks, pageBody, readChildrenRequest } from '../src/notion-body.ts';
+import { parseCandidateFacts } from '../src/candidacy.ts';
+import { selectAchievements, renderCoverLetterDraft, renderTailoredCv } from '../src/application-draft.ts';
 import { ensurePageBody, type HttpTransport } from '../src/notion-sync.ts';
 import { createNotionTransport } from '../src/notion-transport.ts';
 
@@ -31,6 +33,59 @@ test('el cuerpo dice por qué está aquí, cuánto paga y qué publicó la ofert
   // Y el cuerpo reutiliza las funciones del digest: los dos dicen lo mismo de la misma oferta.
   assert.match(serialized, /Salario no publicado por la fuente/);
   assert.match(serialized, /Remoto/);
+});
+
+test('el material de postulación va PRIMERO y literalmente en el cuerpo', () => {
+  // Juan no usaba el tablero porque la carta y el CV no estaban ahí: se escribían en
+  // `output/candidacy/<id>/` como archivos locales que nadie abre. El tablero es donde decide a qué
+  // postularse, así que es donde tiene que estar lo que va a enviar, listo para copiar y pegar.
+  const facts = parseCandidateFacts({ schemaVersion: 2, name: 'Juan Sebastian Silva Medina',
+    headline: 'AI & Automation Engineer', skills: ['typescript'],
+    highlights: ['Runs 30+ production n8n workflows.'],
+    experience: [{ company: 'Dynapro Pumps', role: 'AI Specialist', start: '2026-01',
+      achievements: ['Built a typescript pipeline that cut processing from 90 to 2 minutes.'] }] });
+  const opportunity = job();
+  const matched = ['typescript'];
+  const inputs = { facts, opportunity, profile, matched, selected: selectAchievements(facts, matched) };
+  const material = { coverLetter: renderCoverLetterDraft(inputs), cv: renderTailoredCv(inputs) };
+  const blocks = pageBody({ opportunity, evaluation: evaluate(opportunity, profile, now), profile, material });
+
+  // PRIMERO, antes de la relevancia y antes de la descripción: es lo que se viene a copiar.
+  assert.equal((blocks[0] as { heading_2?: { rich_text: { text: { content: string } }[] } }).heading_2?.rich_text[0]!.text.content, 'Carta de presentación');
+  const order = (needle: string) => texts(blocks).indexOf(needle);
+  assert.ok(order('Carta de presentación') < order('Por qué está aquí'), 'la carta antes del análisis');
+  assert.ok(order('CV adaptado') < order('Descripción publicada'), 'el CV antes de la descripción publicada');
+
+  // Y el contenido es el MISMO que el paquete local, no una segunda redacción: si se construyeran
+  // los bloques aparte, el CV que Juan copia de Notion dejaría de ser el que el revisor verificó.
+  const serialised = texts(blocks);
+  for (const claim of ['Runs 30+ production n8n workflows.',
+    'Built a typescript pipeline that cut processing from 90 to 2 minutes.']) {
+    assert.ok(serialised.includes(claim), `el cuerpo cita literal: ${claim}`);
+  }
+  assert.ok(serialised.includes('Dear Hiring Team,'));
+  assert.ok(serialised.includes('Juan Sebastian Silva Medina'));
+  // Nunca se pasa del tope de Notion, y el material no es lo que se recorta.
+  assert.ok(blocks.length <= MAX_CHILDREN);
+
+  // Sin hechos no se inventa una carta: se dice que falta el archivo.
+  const sinMaterial = texts(pageBody({ opportunity, evaluation: evaluate(opportunity, profile, now), profile }));
+  assert.ok(sinMaterial.includes('candidate-facts'), 'nombra el archivo que falta');
+  assert.ok(!sinMaterial.includes('Dear Hiring Team'), 'y no fabrica una carta');
+});
+
+test('markdownBlocks traduce lo que las plantillas emiten, y nada más', () => {
+  const blocks = markdownBlocks('# Titulo\n\n## Seccion\n\n### Sub\n\n- viñeta\n\nparrafo **con enfasis**\n\n> cita\n');
+  assert.deepEqual(blocks.map(b => b.type), ['heading_2', 'heading_3', 'bulleted_list_item', 'paragraph', 'quote']);
+  // El `#` se omite: la página de Notion ya se llama como la oferta.
+  assert.ok(!JSON.stringify(blocks).includes('Titulo'));
+  // Los asteriscos se quitan en vez de viajar literales: el destino es un formulario web.
+  assert.ok(JSON.stringify(blocks).includes('parrafo con enfasis'));
+  assert.ok(!JSON.stringify(blocks).includes('**'));
+  // Un párrafo más largo que el tope de Notion se trocea en vez de perderse.
+  const largo = markdownBlocks('x'.repeat(4500));
+  assert.equal(largo.length, 3);
+  assert.equal(largo.map(b => (b as { paragraph: { rich_text: { text: { content: string } }[] } }).paragraph.rich_text[0]!.text.content).join('').length, 4500);
 });
 
 test('la checklist se DERIVA de lo que el registro no pudo confirmar', () => {

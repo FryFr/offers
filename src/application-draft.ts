@@ -144,6 +144,10 @@ export function renderTailoredCv(inputs: DraftInputs): string {
 
 ${facts.headline ?? ''}${facts.location ? `\n${facts.location}` : ''}${facts.contact?.links?.length ? `\n${facts.contact.links.join(' | ')}` : ''}
 
+## Profile
+
+${facts.highlights.join('\n\n')}
+
 ## Skills
 
 ${groups.length ? groups.map(group => `- **${group.name}:** ${group.skills.join(', ')}`).join('\n') : '- [TO COMPLETE: declare skillGroups in CandidateFacts]'}

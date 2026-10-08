@@ -12,6 +12,8 @@ import { createClaudeEnricher } from './claude-enrichment.ts';
 import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
 import { pageBody } from './notion-body.ts';
+import { parseCandidateFacts, type CandidateFacts } from './candidacy.ts';
+import { selectAchievements, renderCoverLetterDraft, renderTailoredCv } from './application-draft.ts';
 import { boardEvents, readBoard } from './notion-board.ts';
 import { renderUpskill, upskillReport } from './upskill.ts';
 import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
@@ -387,9 +389,43 @@ export async function runNotionSync(options: { root?: string; now?: Date; limit?
     const relevant = new Set(snapshot.records
       .filter(r => ['strong', 'possible'].includes(r.evaluation.relevance.tier) || delivered.has(r.id))
       .map(r => r.id));
+    /**
+     * Los hechos del candidato, uno por familia de rol, cargados UNA vez.
+     *
+     * Si falta el archivo de una familia, esa oferta sale sin material y el cuerpo lo dice. No se
+     * cae al de otra familia: un CV con el titular equivocado es peor que ninguno, y el contrato de
+     * `CandidateFacts` existe justo para que nadie improvise aquí.
+     */
+    // `default` además de las familias declaradas: 352 de 2.358 ofertas relevantes no calzan con
+    // ninguna familia —puntúan por habilidades sin que el título toque un `roleTerm`— y sin esta
+    // entrada se quedaban sin material. NO es el CV de otra familia: es su propio archivo, con el
+    // titular que el CV declara de por sí.
+    const families = [...Object.keys(profile.relevance.roleFamilies), 'default'];
+    const factsByFamily = new Map<string, CandidateFacts>();
+    for (const family of families) {
+      const raw = await optionalJson(join(data, `candidate-facts-${family}.json`));
+      if (raw !== undefined) factsByFamily.set(family, parseCandidateFacts(raw));
+    }
+    /**
+     * La carta y el CV se renderizan con las MISMAS funciones que el paquete local, y el cuerpo las
+     * convierte a bloques con `markdownBlocks`. Una sola fuente: si se construyeran los bloques
+     * aparte, el CV que Juan copia de Notion dejaría de ser el que el revisor verificó.
+     */
+    const material = (r: (typeof snapshot.records)[number]) => {
+      // `||` y no `??`: cuando ninguna familia calza, `roleFamily` es la CADENA VACÍA, no
+      // `undefined`, y `??` no la atrapa. Medido: 352 de 2.358 ofertas relevantes traen `''`, así
+      // que con `??` se habrían quedado sin material en silencio.
+      const family = r.evaluation.relevance.roleFamily || 'default';
+      const facts = factsByFamily.get(family);
+      if (!facts) return undefined;
+      const matched = [...r.evaluation.relevance.skillsMatched, ...r.evaluation.relevance.secondaryMatched];
+      const inputs = { facts, opportunity: r.opportunity, profile, matched, selected: selectAchievements(facts, matched) };
+      return { coverLetter: renderCoverLetterDraft(inputs), cv: renderTailoredCv(inputs) };
+    };
     // El cuerpo se arma AQUÍ, dentro del lock de lectura, porque necesita la evaluación completa del
     // registro. Después el sync solo lo consulta por clave: la fase de red no vuelve al checkpoint.
     const bodies = new Map(snapshot.records.map(r => [r.id, pageBody({ opportunity: r.opportunity, evaluation: r.evaluation, profile,
+      ...(material(r) ? { material: material(r)! } : {}),
       ...(snapshot.recommendations.find(x => x.id === r.id)?.selectionReason ? { selectionReason: snapshot.recommendations.find(x => x.id === r.id)!.selectionReason } : {}) })]));
     return { bodies, records: options.all === true ? snapshot.notion.records : snapshot.notion.records.filter(r => relevant.has(r.externalKey)) };
   });
