@@ -153,17 +153,49 @@ export interface PruneReport {
  *
  * Un registro **sin `availability` se conserva siempre**: no tiene `validUntil`, y sin señal
  * borrar a ciegas es peor que pagar el espacio. Eso incluye las ofertas de entrada manual.
+ *
+ * **La gracia no se le da a un `off_target`.** `graceDays` existe para que un registro que cayó
+ * de un corte pueda volver a entrar si la fuente lo revalida. Un `off_target` lleva un bloqueador:
+ * nunca estuvo en un corte y no puede entrar a uno, así que los siete días extra no le compran
+ * nada y cuestan mucho. Medido el 2026-10-08 sobre el checkpoint vivo: 22.387 de 28.984 registros
+ * eran `off_target` y pesaban 249,8 MB —el 68% del archivo—, mientras `strong` y `possible` juntos,
+ * que es lo que el sistema existe para producir, pesaban 36,2 MB. Darles gracia cero libera 144,2
+ * MB más que la regla uniforme.
+ *
+ * **Lo ya ENTREGADO no se purga NUNCA, de ningún tier.** Un registro que salió en un digest lo vio
+ * Juan y pudo postularse a él; borrarlo deja la fila del tablero sin nada local que la actualice y
+ * hace imposible regenerar su material. Es la misma razón por la que el sync conserva en el tablero
+ * lo entregado aunque deje de ser relevante.
+ *
+ * Esto NO era así y costó ocho registros. Medido el 2026-10-08: la regla uniforme —la de antes de
+ * este cambio, verificada corriéndola sobre el respaldo— purgaba 8 de los 123 entregados que vivían
+ * en el store, seis de ellos `strong`, y seis habían caducado hacía exactamente 7,0 días. O sea que
+ * estaban justo en el borde de la gracia y cada día se caía otro. La protección por tier no los
+ * salvaba: al no ser `off_target` pasaban al camino normal y la gracia se les acababa igual.
+ *
+ * Lo que cuesta conservarlos: el ledger tiene 218 entradas a ~6,7 KB cada una, ~1,5 MB. Contra
+ * perder la oferta a la que te postulaste, no es una discusión.
  */
-export function pruneStore(store: Store, profile: Profile, now: Date, graceDays = STORE_GRACE_DAYS): { store: Store; report: PruneReport } {
+export function pruneStore(store: Store, profile: Profile, now: Date, graceDays = STORE_GRACE_DAYS,
+  options: { delivered?: ReadonlySet<string> } = {}): { store: Store; report: PruneReport } {
   if (!Number.isSafeInteger(graceDays) || graceDays < 0) throw new Error('graceDays inválido');
-  const cutoff = now.getTime() - graceDays * 86_400_000;
+  const delivered = options.delivered ?? new Set<string>();
   const byReason: Record<string, number> = Object.create(null);
   const kept = store.records.filter(record => {
-    const { status, validUntil } = evaluate(record.opportunity, profile, now).verification;
+    const evaluation = evaluate(record.opportunity, profile, now);
+    const { status, validUntil } = evaluation.verification;
     // Sin `validUntil` no hay señal de caducidad: se conserva.
     if (validUntil === null) { byReason.no_expiry_signal = (byReason.no_expiry_signal ?? 0) + 1; return true; }
-    if (Date.parse(validUntil) >= cutoff) { byReason.still_valid = (byReason.still_valid ?? 0) + 1; return true; }
-    byReason[`removed_${status}`] = (byReason[`removed_${status}`] ?? 0) + 1;
+    // Lo entregado se conserva ANTES de mirar fechas: ningún número de días autoriza a borrar una
+    // oferta que Juan ya vio y a la que pudo postularse.
+    if (delivered.has(record.id)) { byReason.delivered = (byReason.delivered ?? 0) + 1; return true; }
+    const expiredAt = Date.parse(validUntil);
+    const expendable = evaluation.relevance.tier === 'off_target';
+    if (expiredAt >= now.getTime() - (expendable ? 0 : graceDays) * 86_400_000) { byReason.still_valid = (byReason.still_valid ?? 0) + 1; return true; }
+    // Se distingue a quién se lo llevó la gracia cero de quién ya habría caído igual, porque de
+    // eso depende saber en tres días si esta palanca alcanzó o hay que apretar la siguiente.
+    const survivedWithGrace = expiredAt >= now.getTime() - graceDays * 86_400_000;
+    byReason[`removed_${expendable && survivedWithGrace ? 'off_target' : status}`] = (byReason[`removed_${expendable && survivedWithGrace ? 'off_target' : status}`] ?? 0) + 1;
     return false;
   });
   return { store: { version: 1, records: kept },

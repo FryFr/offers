@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { normalize, classify, expiration, evaluate, verification, PUBLICATION_WINDOW_DAYS } from '../src/evaluate.ts';
-import { compactHistory, identity, ingest, parseStore, pruneStore, report, MAX_HISTORY, type Store } from '../src/pipeline.ts';
+import { compactHistory, identity, ingest, parseStore, pruneStore, report, MAX_HISTORY, STORE_GRACE_DAYS, type Store } from '../src/pipeline.ts';
 import { FX, FX_MAX_AGE_DAYS, toUsd } from '../src/fx.ts';
 
 // El perfil de las pruebas DECLARA el rol que busca. Antes no lo hacía y sus ofertas entraban al
@@ -486,6 +486,82 @@ test('la purga conserva lo vigente y olvida lo caducado', () => {
   assert.equal(Object.keys(r.byReason).filter(k => k.startsWith('removed_')).length > 0, true);
   // Y el store purgado sigue siendo un store válido.
   assert.deepEqual(parseStore(store), store);
+});
+
+test('un off_target caducado no recibe gracia, salvo si ya se entregó', () => {
+  // Caducada hace dos días: DENTRO de los siete de gracia, así que la regla uniforme la conserva.
+  const caducadaEnGracia = { ...evidence.availability, checkedAt: '2026-09-13T12:00:00Z' };
+  const en = (slug: string, overrides: Partial<Opportunity> = {}) => {
+    const url = `https://example.com/${slug}`;
+    return verifiedOpportunity({ title: slug, externalId: slug, url,
+      publicationEvidence: { ...evidence.publicationEvidence, url },
+      availability: { ...caducadaEnGracia, url }, ...overrides });
+  };
+  // Perfil LOCAL con un término excluido: el de arriba no declara ninguno, y `roleExcludedTerms`
+  // aplica solo al TÍTULO. Primero intenté llegar a `off_target` con una descripción de ventas y
+  // daba `weak`; la aserción del fixture lo cazó, que es justo para lo que está.
+  const perfil = parseProfile({ skills: ['TypeScript'], remoteOnly: true,
+    relevance: { roleTerms: ['developer', 'software engineer'], roleExcludedTerms: ['account executive'] } });
+  const fuera = en('fuera-de-objetivo', { title: 'Enterprise Account Executive' });
+  const fueraEntregada = en('fuera-entregada', { title: 'Senior Account Executive' });
+  const relevante = en('relevante');
+
+  const state = ingest(empty(), [fuera, fueraEntregada, relevante]);
+  // El fixture se AFIRMA, no se supone: si mañana el ranker cambia y estas dejan de ser
+  // `off_target`, esta prueba debe caerse aquí y no pasar en verde midiendo otra cosa.
+  const tier = (url: string) => evaluate(state.records.find(r => r.opportunity.url === url)!.opportunity, perfil, now).relevance.tier;
+  assert.equal(tier('https://example.com/fuera-de-objetivo'), 'off_target');
+  assert.equal(tier('https://example.com/fuera-entregada'), 'off_target');
+  assert.equal(tier('https://example.com/relevante') === 'off_target', false);
+
+  // EL CONTRASTE, con los mismos tres registros y dos perfiles: bajo el perfil base, que no declara
+  // términos excluidos, ninguna es `off_target`, así que la gracia de siete días las cubre a todas y
+  // sobreviven las tres. Lo que decide no es la fecha —es idéntica—, es el tier.
+  assert.equal(tier('https://example.com/fuera-de-objetivo') === 'off_target', true);
+  assert.equal(evaluate(fuera, profile, now).relevance.tier === 'off_target', false, 'sin términos excluidos no es off_target');
+  assert.equal(pruneStore(state, profile, now).report.wouldRemove, 0, 'caducadas hace 2 días, la gracia son 7: sobreviven');
+
+  // Con la gracia por tier, la `off_target` se va: nunca estuvo en un corte y no puede entrar a uno.
+  const entregada = new Set([identity(fueraEntregada)]);
+  const { store, report: r } = pruneStore(state, perfil, now, STORE_GRACE_DAYS, { delivered: entregada });
+  // Se compara por URL, no por título: el título lleva el término excluido, la URL es la identidad.
+  assert.deepEqual(store.records.map(x => x.opportunity.url).sort(),
+    ['https://example.com/fuera-entregada', 'https://example.com/relevante']);
+  assert.equal(r.wouldRemove, 1);
+  // El motivo distingue a quién se lo llevó la gracia cero de quién habría caído igual, porque de
+  // eso depende saber si la palanca alcanzó.
+  assert.equal(r.byReason.removed_off_target, 1);
+  // La entregada se cuenta como `delivered`, no como `still_valid`: salió por la protección, no
+  // porque la fecha la salvara. El motivo tiene que decir cuál de las dos cosas pasó.
+  assert.equal(r.byReason.delivered, 1);
+  assert.equal(r.byReason.still_valid, 1);
+
+  // Lo ENTREGADO se queda aunque sea `off_target` y esté caducado: Juan lo vio y pudo postularse.
+  // Borrarlo sería borrar la oferta a la que se postuló y con ella la única fila del embudo.
+  assert.equal(store.records.some(x => x.opportunity.url === 'https://example.com/fuera-entregada'), true);
+  // Y sin registro de entregas, esa misma purga sí se la lleva: la protección ES el ledger, no una
+  // propiedad del registro. Si `data/delivered.json` se pierde, se pierde el escudo.
+  assert.equal(pruneStore(state, perfil, now, STORE_GRACE_DAYS, { delivered: new Set() }).report.wouldRemove, 2);
+
+  // Y el caso que de verdad costó registros: un entregado RELEVANTE, caducado MÁS allá de la
+  // gracia. La protección por tier no lo salvaba —al no ser `off_target` pasaba al camino normal—
+  // y la gracia se le acababa igual. Medido el 2026-10-08: así se perdieron 8 de 123 entregados,
+  // seis de ellos `strong`, y seis estaban a 7,0 días exactos del borde.
+  const urlVieja = 'https://example.com/entregada-vieja';
+  const entregadaVieja = verifiedOpportunity({ title: 'Developer', externalId: 'entregada-vieja', url: urlVieja,
+    publicationEvidence: { ...evidence.publicationEvidence, url: urlVieja },
+    // Comprobada hace 30 días: caducó hace 29, muy por fuera de los 7 de gracia.
+    availability: { ...evidence.availability, url: urlVieja, checkedAt: '2026-08-17T12:00:00Z' } });
+  const conVieja = ingest(empty(), [entregadaVieja]);
+  assert.equal(evaluate(entregadaVieja, perfil, now).relevance.tier === 'off_target', false, 'es relevante, no off_target');
+  assert.equal(pruneStore(conVieja, perfil, now, STORE_GRACE_DAYS, { delivered: new Set() }).report.wouldRemove, 1,
+    'sin el ledger se va, por vieja');
+  const protegida = pruneStore(conVieja, perfil, now, STORE_GRACE_DAYS, { delivered: new Set([identity(entregadaVieja)]) });
+  assert.equal(protegida.report.wouldRemove, 0, 'entregada: ningún número de días autoriza a borrarla');
+  assert.equal(protegida.report.byReason.delivered, 1, 'y el motivo lo nombra, para poder contarlo');
+  // Sigue siendo un store válido e idempotente.
+  assert.deepEqual(parseStore(store), store);
+  assert.equal(pruneStore(store, perfil, now, STORE_GRACE_DAYS, { delivered: entregada }).report.wouldRemove, 0);
 });
 
 test('la purga es idempotente y no borra nada en la segunda pasada', () => {

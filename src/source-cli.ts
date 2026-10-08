@@ -147,7 +147,11 @@ export async function vacuumCheckpoint(options: { root?: string; now?: Date; app
   const raw = await readFile(path, 'utf8');
   const checkpoint = JSON.parse(raw) as Record<string, unknown> & { store?: unknown; provenance?: Record<string, unknown> };
   const profile = parseProfile(await json(join(root, 'examples/profile.json')));
-  const pruned = pruneStore(parseStore(checkpoint.store), profile, now, options.graceDays);
+  // El registro de entregas es la lista de lo que Juan YA vio: sin él, la purga podría borrar una
+  // oferta a la que se postuló. Si el archivo no existe todavía, la protección queda vacía y la
+  // purga se comporta como antes: no hay nada entregado que proteger.
+  const ledger = parseLedger(await optionalJson(join(data, 'delivered.json')));
+  const pruned = pruneStore(parseStore(checkpoint.store), profile, now, options.graceDays, { delivered: deliveredIds(ledger) });
   // Y se compacta el historial ya escrito: `ingest` solo puede evitar la repetición en las
   // revisiones nuevas, así que lo acumulado antes conserva su copia de la descripción.
   const history = compactHistory(pruned.store);
