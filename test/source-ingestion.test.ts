@@ -767,6 +767,56 @@ test('un fallo a mitad de la paginación conserva lo recogido; en la primera pá
   assert.equal(cycle.health[0]!.fetched, 100);
 });
 
+test('la pagina que el sync CREA lleva la carta y el CV dentro', async () => {
+  /**
+   * La prueba que faltaba, y la que explica por qué Juan no usaba el tablero: que `pageBody` sepa
+   * construir el material no sirve de nada si el sync no lo pasa. El cuerpo de una página se escribe
+   * UNA vez —el transporte no admite DELETE sobre bloques— así que si esta petición sale sin carta,
+   * esa página no la tendrá nunca.
+   */
+  const root = await mkdtemp(join(tmpdir(), 'offers-sync-material-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), JSON.stringify({ skills: ['typescript'], relevance: { roleTerms: { ai_automation: ['backend engineer'] } } }));
+    const url = 'https://example.com/con-material';
+    const oferta = parseOpportunity({ title: 'Senior Backend Engineer', company: 'Acme', skills: [], url,
+      description: 'Build typescript services.', publishedAt: now.toISOString().slice(0, 10),
+      publicationEvidence: { url, excerpt: 'Published', observedAt: now.toISOString() },
+      availability: { url, checkedAt: now.toISOString(), outcome: 'open', httpStatus: 200, evidence: 'listing' } });
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false,
+      generatedAt: now.toISOString(), health: [{ sourceId: 'x', status: 'ok' }], store: ingest({ version: 1, records: [] }, [oferta]) }));
+    await writeFile(join(root, 'data/notion-local.json'), JSON.stringify({ schemaVerified: true, config: { ...config, enabled: true } }));
+    await writeFile(join(root, 'data/candidate-facts-ai_automation.json'), JSON.stringify({
+      schemaVersion: 2, name: 'Juan Sebastian Silva Medina', headline: 'AI & Automation Engineer',
+      skills: ['typescript'], highlights: ['Runs 30+ production n8n workflows.'],
+      experience: [{ company: 'Dynapro Pumps', role: 'AI Specialist', start: '2026-01',
+        achievements: ['Built a typescript pipeline that cut processing from 90 to 2 minutes.'] }] }));
+    let creada: unknown;
+    const transport: HttpTransport = async request => {
+      if (request.method === 'GET') return { status: 200, body: { object: 'data_source', properties: notionSchema() } };
+      if (request.url.endsWith('/query')) return { status: 200, body: { object: 'list', has_more: false, results: [] } };
+      if (request.url.endsWith('/v1/pages')) { creada = request.body; return { status: 200, body: { object: 'page', id: 'p' } }; }
+      return { status: 200, body: {} };
+    };
+    const result = await runNotionSync({ root, now, dependencies: { transport } });
+    assert.equal(result.counts.created, 1);
+    const enviado = JSON.stringify(creada);
+    // La carta, el CV y los hechos LITERALES viajan en el mismo POST que crea la página.
+    for (const esperado of ['Carta de presentación', 'Dear Hiring Team,', 'CV adaptado',
+      'Juan Sebastian Silva Medina', 'Runs 30+ production n8n workflows.',
+      'Built a typescript pipeline that cut processing from 90 to 2 minutes.']) {
+      assert.ok(enviado.includes(esperado), `la página creada lleva: ${esperado}`);
+    }
+    // Y sin los hechos NO se fabrica una carta: la misma oferta, sin el archivo, sale sin material.
+    await rm(join(root, 'data/candidate-facts-ai_automation.json'));
+    creada = undefined;
+    await runNotionSync({ root, now: new Date(now.getTime() + 1000), dependencies: { transport } });
+    const sinHechos = JSON.stringify(creada);
+    assert.ok(sinHechos.includes('candidate-facts'), 'nombra el archivo que falta');
+    assert.ok(!sinHechos.includes('Dear Hiring Team'), 'y no inventa una carta');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('el sync manda lo relevante, conserva lo ya entregado y todo con --all', async () => {
   // Esto revoca a conciencia la decisión de pipeline.ts de enviar TODO lo verificado "para poder
   // inspeccionar el ranker con un filtro de vista". Con 16.861 registros eso no es un tablero, es un
