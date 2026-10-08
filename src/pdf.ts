@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CandidateFacts } from './candidacy.ts';
+import { tailorCv } from './application-draft.ts';
 
 /** Motores admitidos. `lualatex` y `xelatex` aceptan fuentes del sistema vía `fontspec`. */
 export const ENGINES = ['lualatex', 'xelatex', 'pdflatex'] as const;
@@ -67,9 +68,18 @@ export const DEFAULT_FONT = 'Helvetica';
 const period = (start: string, end?: string) => `${start} - ${end ?? 'present'}`;
 
 /** CV en una columna. Los grupos y los logros llegan ya ordenados; aquí no se decide nada. */
-export function renderCvTex(facts: CandidateFacts, options: { font?: string } = {}): string {
+/**
+ * El CV en LaTeX, adaptado a la oferta.
+ *
+ * `matched` llega por el MISMO camino que el CV en Markdown del cuerpo de Notion: ambos llaman a
+ * `tailorCv`. Sin él, el PDF salía con el orden del archivo de hechos —idéntico para todas las
+ * ofertas— mientras el cuerpo de la misma página mostraba otro. Dos documentos del mismo puesto
+ * diciendo cosas distintas es exactamente lo que no puede pasar cuando uno es el que se envía.
+ */
+export function renderCvTex(facts: CandidateFacts, options: { font?: string; matched?: readonly string[] } = {}): string {
   const contact = [facts.location, facts.contact?.email, facts.contact?.phone, ...(facts.contact?.links ?? [])].filter((v): v is string => !!v);
-  const experience = (facts.experience ?? []).map(entry => `\\textbf{${tex(entry.role)}} \\hfill ${tex(period(entry.start, entry.end))}\\\\
+  const tailored = tailorCv(facts, options.matched ?? []);
+  const experience = tailored.experience.map(entry => `\\textbf{${tex(entry.role)}} \\hfill ${tex(period(entry.start, entry.end))}\\\\
 ${tex(entry.company)}${entry.location ? ` | ${tex(entry.location)}` : ''}
 \\begin{itemize}
 ${entry.achievements.map(a => `\\item ${tex(a)}`).join('\n')}
@@ -80,9 +90,12 @@ ${facts.headline ? `${tex(facts.headline)}\\\\[2pt]` : ''}
 ${contact.map(tex).join(' | ')}
 \\end{center}
 
-${facts.skillGroups?.length ? `\\section*{Skills}
+${facts.highlights.length ? `\\section*{Profile}
+${facts.highlights.map(tex).join('\n\n')}
+` : ''}
+${tailored.groups.length ? `\\section*{Skills}
 \\begin{itemize}
-${facts.skillGroups.map(g => `\\item \\textbf{${tex(g.name)}:} ${g.skills.map(tex).join(', ')}`).join('\n')}
+${tailored.groups.map(g => `\\item \\textbf{${tex(g.name)}:} ${g.skills.map(tex).join(', ')}`).join('\n')}
 \\end{itemize}
 ` : ''}
 ${experience ? `\\section*{Experience}\n${experience}\n` : ''}

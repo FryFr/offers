@@ -45,7 +45,15 @@ export interface NotionConfig {
  */
 export const boardFields = { Estado: 'select', 'Applied at': 'date', Notes: 'rich_text' } as const;
 export type BoardField = keyof typeof boardFields;
-export interface HttpRequest { method: 'GET' | 'POST' | 'PATCH'; url: string; headers: Record<string, string>; body: Record<string, unknown> }
+/**
+ * `form` existe por un solo caso: enviar los bytes de un PDF a `/v1/file_uploads/{id}/send`, que es
+ * la única ruta de Notion que no acepta JSON.
+ *
+ * Va en un campo PROPIO y no ensanchando `body` a `FormData`. Ensanchar el tipo obligaba a cada
+ * consumidor —y a cada prueba— a estrechar antes de leer `body.properties`, por una ruta que solo
+ * usa un sitio. El caso raro paga su propio coste; los veinte normales no.
+ */
+export interface HttpRequest { method: 'GET' | 'POST' | 'PATCH'; url: string; headers: Record<string, string>; body: Record<string, unknown>; form?: FormData }
 export interface HttpResponse { status: number; body: unknown }
 /** Authentication belongs to the caller's transport; this module never reads credentials. */
 export type HttpTransport = (request: HttpRequest) => Promise<HttpResponse>;

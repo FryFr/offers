@@ -140,6 +140,22 @@ export function pageBody(inputs: BodyInputs): Record<string, unknown>[] {
   return blocks.slice(0, MAX_CHILDREN);
 }
 
+/**
+ * Subida de un archivo a Notion, en los dos pasos que exige su API.
+ *
+ * El CV y la carta viajan como PDF porque a una postulación se SUBE un archivo; el texto del cuerpo
+ * sirve para leer y decidir, no para adjuntar a un formulario.
+ */
+export const createUploadRequest = (filename: string): HttpRequest =>
+  ({ method: 'POST', url: 'https://api.notion.com/v1/file_uploads', headers: { 'Notion-Version': '2022-06-28' },
+    body: { filename, content_type: 'application/pdf' } });
+export const sendUploadRequest = (uploadId: string, form: FormData): HttpRequest =>
+  ({ method: 'POST', url: `https://api.notion.com/v1/file_uploads/${encodeURIComponent(uploadId)}/send`,
+    headers: { 'Notion-Version': '2022-06-28' }, body: {}, form });
+/** El bloque que enseña el PDF dentro de la página, con su nombre visible. */
+export const fileBlock = (uploadId: string, name: string) =>
+  ({ object: 'block' as const, type: 'file' as const, file: { type: 'file_upload' as const, file_upload: { id: uploadId }, name } });
+
 const blocksUrl = (pageId: string) => `https://api.notion.com/v1/blocks/${encodeURIComponent(pageId)}/children`;
 export const readChildrenRequest = (pageId: string): HttpRequest => ({ method: 'GET', url: blocksUrl(pageId), headers: {}, body: {} });
 export const appendChildrenRequest = (pageId: string, children: readonly Record<string, unknown>[]): HttpRequest =>

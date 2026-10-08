@@ -124,22 +124,46 @@ ${matched.length ? `>\n> Skills found in this posting: ${matched.join(', ')}.` :
  * la línea de tiempo; lo único que se reordena son los logros DENTRO de cada puesto. Eso es adaptar
  * un CV. Quitar un empleo para que cuadre mejor sería otra cosa, y el contrato no lo permite.
  */
+export interface TailoredCv {
+  /** Grupos de habilidades, el de más coincidencias primero y dentro las coincidentes primero. */
+  groups: { name: string; skills: string[] }[];
+  /** La experiencia en su orden cronológico, con los logros reordenados DENTRO de cada puesto. */
+  experience: { company: string; role: string; start: string; end?: string; location?: string; achievements: string[] }[];
+}
+/**
+ * Adapta el CV a una oferta: qué va primero.
+ *
+ * Vive aquí, exportado, porque lo consumen DOS renderizadores —el Markdown que va al cuerpo de
+ * Notion y el LaTeX que se compila a PDF— y durante un rato solo lo tuvo el primero: el PDF salía
+ * con el orden del archivo de hechos, igual para todas las ofertas, mientras el cuerpo de la misma
+ * página decía otro. Dos documentos del mismo puesto diciendo cosas distintas es justo el fallo que
+ * este proyecto lleva toda la sesión tropezándose.
+ *
+ * La `experience` NO se reordena ni se recorta: la cronología es un hecho. Lo que se reordena son
+ * los logros dentro de cada puesto, que es adaptar, no falsear.
+ */
+export function tailorCv(facts: CandidateFacts, matched: readonly string[]): TailoredCv {
+  const needles = matched.map(skill => canonical(skill));
+  const hits = (text: string) => needles.filter(needle => contains(canonical(text), needle)).length;
+  return {
+    groups: [...(facts.skillGroups ?? [])]
+      .map(group => ({ ...group, score: group.skills.reduce((sum, skill) => sum + (hits(skill) ? 1 : 0), 0),
+        skills: [...group.skills].sort((a, b) => hits(b) - hits(a)) }))
+      .sort((a, b) => b.score - a.score)
+      .map(({ name, skills }) => ({ name, skills })),
+    experience: (facts.experience ?? []).map(entry => ({ ...entry, achievements: [...entry.achievements].sort((a, b) => hits(b) - hits(a)) })),
+  };
+}
 export function renderTailoredCv(inputs: DraftInputs): string {
   // Toda la plantilla se mantiene en ASCII: ni raya larga ni punto medio. El mismo importador de ATS
   // que convierte "2019\u20132026" en "20192026" descarta cualquier otro carácter fuera de ASCII, y
   // predicar la regla para las fechas mientras la estructura la incumple no tiene sentido.
   const { facts, matched } = inputs;
-  const needles = matched.map(skill => canonical(skill));
-  const hits = (text: string) => needles.filter(needle => contains(canonical(text), needle)).length;
-  const groups = [...(facts.skillGroups ?? [])]
-    .map(group => ({ ...group, score: group.skills.reduce((sum, skill) => sum + (hits(skill) ? 1 : 0), 0),
-      skills: [...group.skills].sort((a, b) => hits(b) - hits(a)) }))
-    .sort((a, b) => b.score - a.score);
+  const tailored = tailorCv(facts, matched);
+  const groups = tailored.groups;
   const period = (start: string, end?: string) => `${start} - ${end ?? 'present'}`;
-  const experience = (facts.experience ?? []).map(entry => {
-    const ordered = [...entry.achievements].sort((a, b) => hits(b) - hits(a));
-    return `### ${entry.role} - ${entry.company}\n${period(entry.start, entry.end)}${entry.location ? ` | ${entry.location}` : ''}\n${ordered.map(a => `- ${a}`).join('\n')}`;
-  });
+  const experience = tailored.experience.map(entry =>
+    `### ${entry.role} - ${entry.company}\n${period(entry.start, entry.end)}${entry.location ? ` | ${entry.location}` : ''}\n${entry.achievements.map(a => `- ${a}`).join('\n')}`);
   return `# ${facts.name}
 
 ${facts.headline ?? ''}${facts.location ? `\n${facts.location}` : ''}${facts.contact?.links?.length ? `\n${facts.contact.links.join(' | ')}` : ''}

@@ -11,9 +11,10 @@ import { runSourceCycle, probeSource, type CycleOptions, type SourceState } from
 import { createClaudeEnricher } from './claude-enrichment.ts';
 import { upsertNotionRecords, validateNotionConfig, verifyNotionSchema, applyNotionSchema, compactNotionPlan, DEFAULT_PACING_MS, type HttpTransport, type SchemaIssue } from './notion-sync.ts';
 import { createNotionTransport } from './notion-transport.ts';
-import { pageBody } from './notion-body.ts';
+import { pageBody, readChildrenRequest, appendChildrenRequest, createUploadRequest, sendUploadRequest, fileBlock } from './notion-body.ts';
 import { parseCandidateFacts, type CandidateFacts } from './candidacy.ts';
 import { selectAchievements, renderCoverLetterDraft, renderTailoredCv } from './application-draft.ts';
+import { renderCvTex, renderCoverLetterTex, compilePdf } from './pdf.ts';
 import { boardEvents, readBoard, queryAllRowsRequest, archiveRowRequest } from './notion-board.ts';
 import { renderUpskill, upskillReport } from './upskill.ts';
 import { importTracking, loadTrackingStore, saveTrackingStore, trackingReport } from './tracking.ts';
@@ -214,6 +215,99 @@ export async function archiveBoard(options: { root?: string; apply?: boolean; pa
     if (response.status === 200) archived++; else failed++;
   }
   return { rows: ids.length, archived, failed, applied: true };
+}
+
+/**
+ * Adjunta el CV y la carta en PDF a cada fila del tablero.
+ *
+ * POR QUÉ EXISTE: el cuerpo trae la carta y el CV en texto, que sirve para leer y decidir. Pero a
+ * una postulación se SUBE un archivo. Sin el PDF, el tablero te deja a un copiar-y-pegar y un
+ * maquetado de distancia de poder postularte, y esa distancia es justo donde el sistema se dejaba
+ * de usar.
+ *
+ * IDEMPOTENTE POR LECTURA, y no por suerte: el transporte no admite DELETE sobre bloques, así que
+ * una segunda pasada sin comprobar dejaría dos CVs en cada página y no habría forma de quitar uno.
+ * Antes de adjuntar se leen los hijos y se busca un bloque `file`.
+ *
+ * El PDF se adapta a la oferta con `tailorCv`, la MISMA función que ordena el CV en Markdown del
+ * cuerpo: el archivo que envías y el texto que lees en la misma página no pueden discrepar.
+ */
+export async function attachPdfs(options: { root?: string; now?: Date; limit?: number; apply?: boolean;
+  dependencies?: { transport?: HttpTransport; env?: NodeJS.ProcessEnv } } = {}) {
+  const root = options.root ?? repositoryRoot, data = join(root, 'data');
+  const local = await optionalJson(join(data, 'notion-local.json')) as { schemaVerified?: unknown; config?: unknown } | undefined;
+  if (!local || local.schemaVerified !== true) throw new Error('notion_sync_disabled');
+  const config = validateNotionConfig(local.config);
+  if (!config.enabled) throw new Error('notion_sync_disabled');
+  const now = options.now ?? new Date();
+  const transport = options.dependencies?.transport ?? createNotionTransport(fetch, options.dependencies?.env ?? process.env);
+  const profile = parseProfile(await json(join(root, 'examples/profile.json')));
+  const store = parseStore((await json(join(data, 'source-cycle.json')) as { store?: unknown }).store);
+  const snapshot = report(store, profile, now);
+  const byKey = new Map(snapshot.records.map(r => [r.id, r]));
+  const facts = new Map<string, CandidateFacts>();
+  for (const family of [...Object.keys(profile.relevance.roleFamilies), 'default']) {
+    const raw = await optionalJson(join(data, `candidate-facts-${family}.json`));
+    if (raw !== undefined) facts.set(family, parseCandidateFacts(raw));
+  }
+  // Todas las filas primero, por el mismo motivo que en el archivado: el cursor no debe moverse
+  // mientras se escribe.
+  const rows: { id: string; externalKey: string }[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 500; page++) {
+    const response = await transport(queryAllRowsRequest(config, cursor));
+    if (response.status !== 200) throw new Error('board_unreadable');
+    const body = response.body as { results?: { id?: unknown; properties?: Record<string, unknown> }[]; has_more?: unknown; next_cursor?: unknown } | null;
+    if (!Array.isArray(body?.results)) throw new Error('board_unreadable');
+    for (const row of body.results) {
+      const key = ((row.properties?.[config.externalKeyProperty] as { rich_text?: { plain_text?: string }[] } | undefined)?.rich_text ?? [])
+        .map(chunk => chunk.plain_text ?? '').join('');
+      if (typeof row.id === 'string' && /^[a-f0-9]{64}$/.test(key)) rows.push({ id: row.id, externalKey: key });
+    }
+    if (body.has_more !== true || typeof body.next_cursor !== 'string' || !body.next_cursor) break;
+    cursor = body.next_cursor;
+  }
+  const report_ = { rows: rows.length, attached: 0, already: 0, noRecord: 0, noFacts: 0, failed: 0, applied: options.apply === true };
+  const directory = join(data, 'pdf');
+  for (const row of rows) {
+    if (options.limit !== undefined && report_.attached >= options.limit) break;
+    const record = byKey.get(row.externalKey);
+    if (!record) { report_.noRecord++; continue; }
+    const family = record.evaluation.relevance.roleFamily || 'default';
+    const candidate = facts.get(family);
+    if (!candidate) { report_.noFacts++; continue; }
+    // Idempotencia: si ya hay un bloque de archivo, no se pone otro. No se puede deshacer.
+    const children = await transport(readChildrenRequest(row.id));
+    const existing = (children.body as { results?: { type?: string }[] } | null)?.results ?? [];
+    if (existing.some(block => block.type === 'file')) { report_.already++; continue; }
+    if (options.apply !== true) { report_.attached++; continue; }
+    try {
+      const matched = [...record.evaluation.relevance.skillsMatched, ...record.evaluation.relevance.secondaryMatched];
+      const selected = selectAchievements(candidate, matched);
+      const pdfs: { name: string; label: string; path: string }[] = [
+        { name: 'cv', label: 'CV.pdf', path: await compilePdf(renderCvTex(candidate, { matched }), directory, 'cv') },
+        { name: 'cover-letter', label: 'Cover letter.pdf', path: await compilePdf(renderCoverLetterTex({ facts: candidate,
+          company: record.opportunity.company,
+          paragraphs: [`I am writing about the ${record.opportunity.title} role at ${record.opportunity.company}.`],
+          bullets: selected.map(s => s.achievement) }), directory, 'cover-letter') },
+      ];
+      const blocks: Record<string, unknown>[] = [];
+      for (const pdf of pdfs) {
+        const created = await transport(createUploadRequest(pdf.label));
+        const uploadId = (created.body as { id?: unknown } | null)?.id;
+        if (typeof uploadId !== 'string') throw new Error('upload_not_created');
+        const form = new FormData();
+        form.append('file', new Blob([await readFile(pdf.path)], { type: 'application/pdf' }), pdf.label);
+        const sent = await transport(sendUploadRequest(uploadId, form));
+        if (sent.status !== 200) throw new Error('upload_failed');
+        blocks.push(fileBlock(uploadId, pdf.label));
+      }
+      const appended = await transport(appendChildrenRequest(row.id, blocks));
+      if (appended.status !== 200) throw new Error('append_failed');
+      report_.attached++;
+    } catch { report_.failed++; }
+  }
+  return report_;
 }
 
 /**
@@ -590,6 +684,24 @@ export async function sourcesMain(args: string[], root = repositoryRoot): Promis
       console.log(JSON.stringify(await applicationFunnel({ root, ...(cutoff ? { cutoff } : {}) })));
       return 0;
     } catch (error) { console.error(error instanceof Error ? error.message : 'funnel_failed'); return 4; }
+  }
+  if (args[0] === '--attach-pdfs') {
+    const rest = args.slice(1);
+    const apply = rest.includes('--apply');
+    const limitAt = rest.indexOf('--limit');
+    const limit = limitAt === -1 ? undefined : rest[limitAt + 1];
+    if ((apply ? 1 : 0) + (limitAt === -1 ? 0 : 2) !== rest.length || (limitAt !== -1 && !/^\d+$/.test(limit ?? ''))) {
+      console.error('attach_pdfs_arguments'); return 2;
+    }
+    try {
+      const summary = await attachPdfs({ root, apply, ...(limit !== undefined ? { limit: Number(limit) } : {}) });
+      console.log(JSON.stringify(summary));
+      return summary.failed > 0 ? 7 : 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'attach_pdfs_failed';
+      if (message === 'notion_sync_disabled') { console.error(message); return 5; }
+      console.error(message); return 4;
+    }
   }
   if (args[0] === '--archive-board') {
     // `--apply` explícito, como en `--vacuum`: archivar miles de filas se mira antes de encenderlo.
