@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
 import { normalize, classify, expiration, evaluate, verification, PUBLICATION_WINDOW_DAYS } from '../src/evaluate.ts';
-import { compactHistory, identity, ingest, parseStore, pruneStore, report, MAX_HISTORY, STORE_GRACE_DAYS, type Store } from '../src/pipeline.ts';
+import { compactHistory, identity, ingest, parseStore, pruneStore, report, MAX_HISTORY, STORE_GRACE_DAYS, NOTION_RICH_TEXT_LIMIT, type Store } from '../src/pipeline.ts';
 import { FX, FX_MAX_AGE_DAYS, toUsd } from '../src/fx.ts';
 
 // El perfil de las pruebas DECLARA el rol que busca. Antes no lo hacía y sus ofertas entraban al
@@ -460,6 +460,39 @@ test('una revisión cuya cita de patrocinio vive en la descripción la conserva 
   const ahorrada = ingest(ingest(empty(), normal), normalMovida);
   assert.equal('description' in ahorrada.records[0]!.history![0]!, false, 'sin evidencia que sostener, se ahorra');
   assert.deepEqual(parseStore(ahorrada), ahorrada);
+});
+
+test('ninguna propiedad de texto se pasa del tope de 2000 que impone Notion', () => {
+  /**
+   * `Location`, `Company` y `Screening reasons` construían su `rich_text` a mano y se saltaban el
+   * troceo de `notionRichText`. El 2026-10-08 la oferta de Consensys —195 restricciones de
+   * ubicación— puso 2.410 caracteres en `Location` y Notion respondió, textual:
+   * "body.properties.Location.rich_text[0].text.content.length should be ≤ 2000, instead was 2410".
+   * El sync la reportaba `failed: 1` en cada corrida.
+   *
+   * El tope es por FRAGMENTO, no por propiedad: `Explanation` con 2.841 caracteres nunca falló
+   * porque ya pasaba por el helper y salía en dos. El helper funcionaba; fallaba quien no lo usaba.
+   */
+  const largo = (n: number) => 'x'.repeat(n);
+  const monstruo = verifiedOpportunity({
+    title: largo(2500), company: largo(2400),
+    location: Array.from({ length: 195 }, (_, i) => `pais-numero-${i}`).join(', '),
+    description: largo(9000),
+  });
+  const result = report(ingest(empty(), [monstruo]), profile, now);
+  const props = result.notion.records[0]!.properties as Record<string, { rich_text?: { text: { content: string } }[]; title?: { text: { content: string } }[] }>;
+  let revisadas = 0;
+  for (const [name, value] of Object.entries(props)) {
+    for (const chunk of [...(value.rich_text ?? []), ...(value.title ?? [])]) {
+      revisadas++;
+      assert.ok(chunk.text.content.length <= NOTION_RICH_TEXT_LIMIT,
+        `${name}: un fragmento mide ${chunk.text.content.length}, y Notion devuelve 400 por encima de ${NOTION_RICH_TEXT_LIMIT}`);
+    }
+  }
+  assert.ok(revisadas >= 6, `se revisaron ${revisadas} fragmentos`);
+  // Y trocear no es truncar: el texto completo sigue ahí, repartido.
+  assert.equal(props.Location!.rich_text!.map(c => c.text.content).join(''), monstruo.location);
+  assert.equal(props.Name!.title!.map(c => c.text.content).join(''), monstruo.title);
 });
 
 test('la purga conserva lo vigente y olvida lo caducado', () => {

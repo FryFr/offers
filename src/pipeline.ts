@@ -10,11 +10,28 @@ export const MAX_HISTORY = 5;
 const canonicalText = (s: string) => s.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
 /** Trocea a los 2000 caracteres que Notion admite por bloque de texto. Exportado para que el cuerpo
  *  de la página no escriba un segundo troceador con el mismo límite y distinto redondeo. */
+/** Tope por FRAGMENTO que impone Notion. Varios fragmentos en una propiedad sí se admiten. */
+export const NOTION_RICH_TEXT_LIMIT = 2000;
+/**
+ * Texto enriquecido de Notion, troceado al tope.
+ *
+ * Toda propiedad de texto pasa por aquí, sin excepción, y eso costó una oferta. `Location`,
+ * `Company` y `Screening reasons` construían su `rich_text` a mano y se saltaban el troceo. El
+ * 2026-10-08 la oferta de Consensys —195 restricciones de ubicación— puso 2.410 caracteres en
+ * `Location` y Notion respondió, textual: "body.properties.Location.rich_text[0].text.content.length
+ * should be ≤ 2000, instead was 2410". El sync la reportaba `failed: 1` en cada corrida.
+ *
+ * `Explanation`, con 2.841 caracteres, nunca falló: ya pasaba por aquí y salía en dos fragmentos. El
+ * límite es por fragmento, no por propiedad. O sea que el helper funcionaba; lo que fallaba era
+ * quien no lo usaba.
+ */
 export const notionRichText = (values: readonly string[]) => values.flatMap(value => {
   const chunks: { text: { content: string } }[] = [];
-  for (let start = 0; start < value.length; start += 2000) chunks.push({ text: { content: value.slice(start, start + 2000) } });
+  for (let start = 0; start < value.length; start += NOTION_RICH_TEXT_LIMIT) chunks.push({ text: { content: value.slice(start, start + NOTION_RICH_TEXT_LIMIT) } });
   return chunks;
 });
+/** El título tiene el mismo tope, y una oferta con un título larguísimo no debe tumbar su fila. */
+export const notionTitle = (value: string) => notionRichText([value]);
 export function identity(o: Opportunity): string {
   let key: string;
   if (o.source && o.externalId) key = JSON.stringify(['source', canonicalText(o.source), o.externalId]);
@@ -221,8 +238,8 @@ export function report(store: Store, profile: Profile, now: Date, options: { del
         externalKey: r.id,
         opportunity: r.opportunity,
         properties: {
-          Name: { title: [{ text: { content: r.opportunity.title } }] },
-          Company: { rich_text: [{ text: { content: r.opportunity.company } }] },
+          Name: { title: notionTitle(r.opportunity.title) },
+          Company: { rich_text: notionRichText([r.opportunity.company]) },
           URL: { url: r.opportunity.url ?? null },
           Type: { select: { name: r.evaluation.classification.kind } },
           Expiration: { select: { name: r.evaluation.expiration } },
@@ -231,9 +248,9 @@ export function report(store: Store, profile: Profile, now: Date, options: { del
           Published: { date: r.opportunity.publishedAt ? { start: r.opportunity.publishedAt } : null },
           Deadline: { date: r.opportunity.expiresAt ? { start: r.opportunity.expiresAt } : null },
           Screening: { select: { name: r.evaluation.screening.status } },
-          'Screening reasons': { rich_text: r.evaluation.screening.reasons.map(content => ({ text: { content } })) },
+          'Screening reasons': { rich_text: notionRichText(r.evaluation.screening.reasons) },
           'Employment eligibility': { select: { name: r.evaluation.screening.employment.status } },
-          Location: { rich_text: r.opportunity.location ? [{ text: { content: r.opportunity.location } }] : [] },
+          Location: { rich_text: notionRichText(r.opportunity.location ? [r.opportunity.location] : []) },
           Relocation: { select: { name: r.opportunity.relocationRequired === undefined ? 'unknown' : r.opportunity.relocationRequired ? 'required' : 'not_required' } },
           'Recommendation rank': { number: ranks.get(r.id)?.rank ?? null },
           'Recommendation priority': { number: ranks.get(r.id)?.priority ?? null },
