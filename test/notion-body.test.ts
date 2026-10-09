@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseOpportunity, parseProfile, type Opportunity } from '../src/contracts.ts';
+import { ingest } from '../src/pipeline.ts';
 import { evaluate } from '../src/evaluate.ts';
 import { DESCRIPTION_BLOCKS, MAX_CHILDREN, appendChildrenRequest, markdownBlocks, pageBody, readChildrenRequest } from '../src/notion-body.ts';
 import { parseCandidateFacts } from '../src/candidacy.ts';
 import { selectAchievements, renderCoverLetterDraft, renderTailoredCv } from '../src/application-draft.ts';
 import { ensurePageBody, type HttpTransport } from '../src/notion-sync.ts';
-import { archiveBoard } from '../src/source-cli.ts';
+import { archiveBoard, attachPdfs } from '../src/source-cli.ts';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -149,6 +150,59 @@ test('el cuerpo se escribe una vez y NUNCA se reescribe', async () => {
   // Y una respuesta que no se puede interpretar falla en vez de suponer que la página estaba vacía.
   await assert.rejects(ensurePageBody('page-1', children, async () => ({ status: 200, body: {} })), /notion_body_unreadable/);
   await assert.rejects(ensurePageBody('page-1', children, async () => ({ status: 404, body: null })), /notion_body_unreadable/);
+});
+
+test('los PDF se adjuntan una sola vez, y el CV se adapta a la oferta', async () => {
+  /**
+   * El transporte no admite DELETE sobre bloques, así que una segunda pasada sin comprobar dejaría
+   * dos CVs en cada página y NO habría forma de quitar uno. La idempotencia aquí no es una mejora:
+   * es lo único que separa un tablero útil de uno que se ensucia solo.
+   */
+  const root = await mkdtemp(join(tmpdir(), 'offers-pdfs-'));
+  try {
+    await mkdir(join(root, 'examples')); await mkdir(join(root, 'data'));
+    await writeFile(join(root, 'examples/profile.json'), JSON.stringify({ skills: ['typescript'], relevance: { roleTerms: { ai_automation: ['backend engineer'] } } }));
+    const url = 'https://example.com/pdf';
+    const oferta = parseOpportunity({ title: 'Senior Backend Engineer', company: 'Acme', skills: [], url,
+      description: 'Build typescript services.', publishedAt: now.toISOString().slice(0, 10),
+      publicationEvidence: { url, excerpt: 'Published', observedAt: now.toISOString() },
+      availability: { url, checkedAt: now.toISOString(), outcome: 'open', httpStatus: 200, evidence: 'listing' } });
+    const store = ingest({ version: 1, records: [] }, [oferta]);
+    await writeFile(join(root, 'data/source-cycle.json'), JSON.stringify({ version: 1, mode: 'dry-run', confirmed: false,
+      generatedAt: now.toISOString(), health: [{ sourceId: 'x', status: 'ok' }], store }));
+    await writeFile(join(root, 'data/notion-local.json'), JSON.stringify({ schemaVerified: true,
+      config: { enabled: true, dataSourceId: '4c2fb0a6-6c69-4fe7-9bc0-21cf0825851a', externalKeyProperty: 'External key', propertyMap: {} } }));
+    await writeFile(join(root, 'data/candidate-facts-ai_automation.json'), JSON.stringify({
+      schemaVersion: 2, name: 'Juan Sebastian Silva Medina', headline: 'AI & Automation Engineer',
+      skills: ['typescript'], highlights: ['Runs 30+ production n8n workflows.'],
+      experience: [{ company: 'Dynapro Pumps', role: 'AI Specialist', start: '2026-01',
+        achievements: ['Built a typescript pipeline that cut processing from 90 to 2 minutes.'] }] }));
+    const key = store.records[0]!.id;
+    let hijos: { type: string }[] = [];
+    const llamadas: string[] = [];
+    const transport: HttpTransport = async request => {
+      llamadas.push(`${request.method} ${new URL(request.url).pathname}`);
+      if (request.url.endsWith('/query')) return { status: 200, body: { results: [{ id: 'fila-1',
+        properties: { 'External key': { rich_text: [{ plain_text: key }] } } }], has_more: false } };
+      if (request.method === 'GET') return { status: 200, body: { results: hijos } };
+      if (request.url.endsWith('/v1/file_uploads')) return { status: 200, body: { id: 'subida-1' } };
+      if (request.url.includes('/send')) return { status: 200, body: { status: 'uploaded' } };
+      hijos = [...hijos, ...((request.body as { children?: { type: string }[] }).children ?? [])];
+      return { status: 200, body: { results: [] } };
+    };
+    // Sin `apply` cuenta y no escribe nada.
+    assert.deepEqual((await attachPdfs({ root, now, dependencies: { transport } })).attached, 1);
+    assert.equal(llamadas.some(c => c.includes('file_uploads')), false, 'un conteo no sube archivos');
+
+    const primera = await attachPdfs({ root, now, apply: true, dependencies: { transport } });
+    assert.deepEqual({ ...primera }, { rows: 1, attached: 1, already: 0, noRecord: 0, noFacts: 0, failed: 0, applied: true });
+    assert.equal(hijos.filter(b => b.type === 'file').length, 2, 'CV y carta, dos bloques');
+
+    // LA SEGUNDA PASADA NO DUPLICA. Esto es lo que no se puede deshacer si falla.
+    const segunda = await attachPdfs({ root, now, apply: true, dependencies: { transport } });
+    assert.deepEqual({ ...segunda }, { rows: 1, attached: 0, already: 1, noRecord: 0, noFacts: 0, failed: 0, applied: true });
+    assert.equal(hijos.filter(b => b.type === 'file').length, 2, 'siguen siendo dos, no cuatro');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('el archivado recoge TODOS los ids antes de archivar ninguno', async () => {
